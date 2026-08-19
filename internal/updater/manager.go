@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -144,6 +145,15 @@ func writeJSONAtomic(path string, value any, mode os.FileMode) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
+	if directoryInfo, statErr := os.Stat(dir); statErr != nil {
+		temporary.Close()
+		return statErr
+	} else if owner, ok := directoryInfo.Sys().(*syscall.Stat_t); ok {
+		if err := temporary.Chown(int(owner.Uid), int(owner.Gid)); err != nil {
+			temporary.Close()
+			return err
+		}
+	}
 	if err := temporary.Chmod(mode); err != nil {
 		temporary.Close()
 		return err

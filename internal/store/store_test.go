@@ -98,6 +98,45 @@ func TestAgentCredentialsReturnsMachineBinding(t *testing.T) {
 	}
 }
 
+func TestEnrollmentCanBeCheckedBeforeConsumption(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	ctx := context.Background()
+	if err := storage.CreateEnrollment(ctx, "token-hash", "new server", "", time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if enrollment, err := storage.Enrollment(ctx, "token-hash"); err != nil || enrollment.Label != "new server" {
+		t.Fatalf("Enrollment() = %#v, %v", enrollment, err)
+	}
+	if _, err := storage.Enrollment(ctx, "token-hash"); err != nil {
+		t.Fatalf("preflight consumed enrollment: %v", err)
+	}
+	if _, err := storage.ConsumeEnrollment(ctx, "token-hash"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.Enrollment(ctx, "token-hash"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("consumed enrollment remained valid: %v", err)
+	}
+}
+
+func TestAgentNameByMachineID(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if err := storage.CreateAgent(context.Background(), NewAgent{ID: "agent-1", Name: "existing", MachineID: "cloned-machine", SecretHash: "hash"}); err != nil {
+		t.Fatal(err)
+	}
+	name, err := storage.AgentNameByMachineID(context.Background(), "cloned-machine")
+	if err != nil || name != "existing" {
+		t.Fatalf("AgentNameByMachineID() = %q, %v", name, err)
+	}
+}
+
 func TestCredentialRotationAndRevocation(t *testing.T) {
 	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {

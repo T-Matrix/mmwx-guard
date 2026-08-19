@@ -255,6 +255,15 @@ type Enrollment struct {
 	AgentID string
 }
 
+func (s *Store) Enrollment(ctx context.Context, tokenHash string) (Enrollment, error) {
+	var enrollment Enrollment
+	err := s.db.QueryRowContext(ctx, `SELECT label,agent_id FROM enrollment_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?`, tokenHash, now()).Scan(&enrollment.Label, &enrollment.AgentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrNotFound
+	}
+	return enrollment, err
+}
+
 func (s *Store) ConsumeEnrollment(ctx context.Context, tokenHash string) (Enrollment, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -296,6 +305,15 @@ func (s *Store) AgentSecretHash(ctx context.Context, id string) (string, error) 
 func (s *Store) AgentName(ctx context.Context, id string) (string, error) {
 	var name string
 	err := s.db.QueryRowContext(ctx, `SELECT name FROM agents WHERE id=?`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return name, err
+}
+
+func (s *Store) AgentNameByMachineID(ctx context.Context, machineID string) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT name FROM agents WHERE machine_id=?`, machineID).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}

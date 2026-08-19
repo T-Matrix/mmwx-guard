@@ -333,7 +333,24 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Agent 机器标识无效")
 		return
 	}
-	enrollment, err := s.store.ConsumeEnrollment(r.Context(), hashToken(req.Token))
+	tokenHash := hashToken(req.Token)
+	enrollment, err := s.store.Enrollment(r.Context(), tokenHash)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "安装令牌无效、已使用或已过期")
+		return
+	}
+	if enrollment.AgentID == "" {
+		existingName, lookupErr := s.store.AgentNameByMachineID(r.Context(), req.MachineID)
+		if lookupErr == nil {
+			writeError(w, http.StatusConflict, fmt.Sprintf("机器标识与已注册服务器“%s”重复，通常是 VPS 模板复制了系统 machine-id；本次令牌尚未消耗，请重新执行最新版安装命令", existingName))
+			return
+		}
+		if !errors.Is(lookupErr, store.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, "检查 Agent 机器标识失败")
+			return
+		}
+	}
+	enrollment, err = s.store.ConsumeEnrollment(r.Context(), tokenHash)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "安装令牌无效、已使用或已过期")
 		return
@@ -364,7 +381,7 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 		err = s.store.CreateAgent(r.Context(), store.NewAgent{ID: id, Name: req.Name, MachineID: req.MachineID, SecretHash: hashToken(secret), OS: req.OS, Arch: req.Arch, Version: req.Version, IPAddress: ip})
 		if err != nil {
-			writeError(w, http.StatusConflict, "这台机器已经注册，请使用服务器详情中的重新配对")
+			writeError(w, http.StatusConflict, "机器标识发生并发冲突，请重新执行安装命令")
 			return
 		}
 		_ = s.store.AddEvent(r.Context(), "info", "agent_enrolled", id, "Agent 注册成功: "+req.Name, map[string]string{"ip": ip})

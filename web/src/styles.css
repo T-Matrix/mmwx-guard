@@ -256,12 +256,16 @@ h1, h2, h3, p { margin: 0; }
 .secondary-button:hover { color: var(--accent); border-color: var(--accent); }
 .danger-button { background: var(--red); border-color: color-mix(in srgb, var(--red) 65%, var(--text)); color: #fff; }
 .danger-button:hover { background: color-mix(in srgb, var(--red) 82%, #000); }
-.list-controls { min-height: 50px; padding: 8px 10px; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(150px, .35fr) minmax(150px, .35fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2) 45%, var(--surface)); }
+.list-controls { min-height: 50px; padding: 8px 10px; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(150px, .35fr) minmax(190px, .42fr); align-items: center; gap: 8px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface-2) 45%, var(--surface)); }
 .events-controls { grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(140px, .35fr)); }
 .list-controls label { position: relative; min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .list-controls label > svg { position: absolute; left: 9px; z-index: 1; pointer-events: none; }
 .list-controls .search-field input { padding-left: 32px; }
 .list-controls input, .list-controls select { min-height: var(--control-height); height: var(--control-height); background: var(--surface); }
+.sort-controls { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) var(--control-height); gap: 6px; }
+.sort-controls label { min-width: 0; }
+.sort-direction { width: var(--control-height); height: var(--control-height); padding: 0; display: grid; place-items: center; border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
+.sort-direction:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .table-wrap { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { height: 36px; padding: 6px 10px; text-align: left; background: var(--surface-2); color: var(--muted); border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -271,6 +275,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent-soft) 55%, transpar
 td > strong, td > small { display: block; }
 td > small { color: var(--muted); margin-top: 3px; }
 .resource-cell { min-width: 126px; white-space: nowrap; }
+.network-rate { min-width: 102px; display: grid; gap: 2px; white-space: nowrap; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; }
+.network-rate span { display: inline-flex; align-items: center; gap: 3px; }
+.network-rate span:first-child { color: var(--blue); }
+.network-rate span:last-child { color: var(--green); }
 .integration-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .integration-badges span { display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; border: 1px solid var(--line); color: var(--muted); background: var(--surface-2); font-size: 9px; font-weight: 800; white-space: nowrap; }
 .integration-badges span.active { color: var(--green); border-color: color-mix(in srgb, var(--green) 55%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); }
@@ -320,7 +328,7 @@ td > small { color: var(--muted); margin-top: 3px; }
 .detail-tabs { display: flex; align-items: center; overflow-x: auto; border-bottom: 2px solid var(--line); }
 .detail-tabs button { min-width: 106px; min-height: 38px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--muted); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .detail-tabs button:hover, .detail-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--accent-soft); }
-.detail-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--section-gap); }
+.detail-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: var(--section-gap); }
 .detail-metrics .metric { min-height: 104px; }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--section-gap); }
 .detail-panel { min-height: 230px; padding: var(--panel-padding); }

@@ -2,7 +2,10 @@ package telemetry
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestParseCPUSample(t *testing.T) {
@@ -30,5 +33,69 @@ func TestParseCPUSampleRejectsInvalidInput(t *testing.T) {
 		if _, ok := parseCPUSample(input); ok {
 			t.Fatalf("parseCPUSample(%q) unexpectedly succeeded", input)
 		}
+	}
+}
+
+func TestMachineIDPrefersAgentIdentity(t *testing.T) {
+	dir := t.TempDir()
+	agentPath := filepath.Join(dir, "agent-id")
+	systemPath := filepath.Join(dir, "machine-id")
+	if err := os.WriteFile(agentPath, []byte("agent-owned\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(systemPath, []byte("cloned-system\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := machineIDFromFiles([]string{agentPath, systemPath}); got != "agent-owned" {
+		t.Fatalf("machineIDFromFiles() = %q", got)
+	}
+}
+
+func TestParseNetworkCountersExcludesLoopbackAndContainerLinks(t *testing.T) {
+	raw := `Inter-|   Receive                                                |  Transmit
+ face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed
+    lo: 100 1 0 0 0 0 0 0 200 1 0 0 0 0 0 0
+  eth0: 1000 1 0 0 0 0 0 0 2000 1 0 0 0 0 0 0
+ veth1: 3000 1 0 0 0 0 0 0 4000 1 0 0 0 0 0 0
+   wg0: 500 1 0 0 0 0 0 0 700 1 0 0 0 0 0 0`
+	receive, transmit := parseNetworkCounters(raw)
+	if receive != 1500 || transmit != 2700 {
+		t.Fatalf("parseNetworkCounters() = %d/%d, want 1500/2700", receive, transmit)
+	}
+}
+
+func TestNetworkUsageCalculatesRatesAndHandlesCounterReset(t *testing.T) {
+	collector := &Collector{}
+	collector.networkMu.Lock()
+	collector.lastNetwork = networkSample{receiveBytes: 1000, transmitBytes: 2000, collectedAt: time.Unix(100, 0)}
+	collector.hasNetwork = true
+	collector.networkMu.Unlock()
+	// Test the rate arithmetic without depending on the host's /proc values.
+	previous := networkSample{receiveBytes: 1000, transmitBytes: 2000, collectedAt: time.Unix(100, 0)}
+	current := networkSample{receiveBytes: 3000, transmitBytes: 5000, collectedAt: time.Unix(102, 0)}
+	if got := networkRate(previous.receiveBytes, current.receiveBytes, current.collectedAt.Sub(previous.collectedAt)); got != 1000 {
+		t.Fatalf("networkRate(receive) = %d", got)
+	}
+	if got := networkRate(previous.transmitBytes, current.transmitBytes, current.collectedAt.Sub(previous.collectedAt)); got != 1500 {
+		t.Fatalf("networkRate(transmit) = %d", got)
+	}
+	if got := networkRate(5000, 100, time.Second); got != 0 {
+		t.Fatalf("networkRate(reset) = %d", got)
+	}
+}
+
+func TestParseSocketStatsCountsOnlyInboundListenerConnections(t *testing.T) {
+	raw := `LISTEN 0 4096 0.0.0.0:15542 0.0.0.0:*
+LISTEN 0 4096 [::]:22 [::]:*
+ESTAB 0 0 10.0.0.2:15542 198.51.100.10:41000
+ESTAB 0 0 10.0.0.2:51000 156.229.164.222:15542
+TIME-WAIT 0 0 10.0.0.2:15542 198.51.100.11:41001
+SYN-SENT 0 1 10.0.0.2:51001 45.59.186.47:443`
+	stats, sources := parseSocketStats(raw)
+	if stats.Total != 2 || stats.Established != 1 || stats.TimeWait != 1 || stats.SynSent != 0 {
+		t.Fatalf("parseSocketStats() stats = %#v", stats)
+	}
+	if len(sources) != 2 || sources[0].IP == "156.229.164.222" || sources[1].IP == "156.229.164.222" {
+		t.Fatalf("parseSocketStats() sources = %#v", sources)
 	}
 }

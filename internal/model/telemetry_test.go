@@ -28,6 +28,8 @@ func TestTelemetryValidate(t *testing.T) {
 		{"negative sockets", func(value *Telemetry) { value.Sockets.Total = -1 }},
 		{"state exceeds total", func(value *Telemetry) { value.Sockets.Established = 21 }},
 		{"invalid source", func(value *Telemetry) { value.TopSources[0].IP = "not-an-ip" }},
+		{"invalid receive rate", func(value *Telemetry) { value.Network.ReceiveBytesPerSecond = 1 << 51 }},
+		{"invalid transmit rate", func(value *Telemetry) { value.Network.TransmitBytesPerSecond = 1 << 51 }},
 		{"too many sources", func(value *Telemetry) {
 			value.Sockets.Total = MaxTopSources + 1
 			value.TopSources = make([]SourceCount, MaxTopSources+1)

@@ -23,6 +23,12 @@ export type Telemetry = {
   load_5: number
   memory_used: number
   memory_total: number
+  network?: {
+    receive_bytes: number
+    transmit_bytes: number
+    receive_bytes_per_second: number
+    transmit_bytes_per_second: number
+  }
   sockets: { total: number; established: number; syn_recv: number; syn_sent: number; time_wait: number }
   conntrack: number
   conntrack_max: number

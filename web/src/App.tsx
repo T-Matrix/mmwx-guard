@@ -1,6 +1,6 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, CircleGauge, Clipboard, Copy,
+  Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, ChevronRight, CircleGauge, Clipboard, Copy,
   Cable, Cpu, Download, ExternalLink, FileClock, Filter, KeyRound, Link2, Link2Off, ListFilter, LockKeyhole, LogOut, Maximize2, Moon,
   Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, RotateCw, Save, Search, Server, Settings2,
   ShieldCheck, ShieldX, SlidersHorizontal, Sun, Trash2, X, Zap,
@@ -13,6 +13,8 @@ type DetailTab = 'overview' | 'protection' | 'services' | 'security' | 'events'
 type RouteState = { tab: Tab; agentID: string; detailTab: DetailTab }
 type Summary = { agents_total: number; agents_online: number; sockets: number; established: number; time_wait: number; conntrack: number; dropped: number; protected: number }
 type EditablePortRule = PortRule & { manual: boolean; source_rules: string[] }
+type AgentSortKey = 'name' | 'status' | 'receive' | 'transmit' | 'cpu' | 'memory' | 'connections' | 'conntrack'
+type SortDirection = 'asc' | 'desc'
 
 const defaultSummary: Summary = { agents_total: 0, agents_online: 0, sockets: 0, established: 0, time_wait: 0, conntrack: 0, dropped: 0, protected: 0 }
 
@@ -199,8 +201,8 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
     </section>
     <section className="overview-grid">
       <div className="panel source-panel">
-        <PanelHeader icon={<Zap size={21} />} title="高频来源" subtitle={`按当前连接与最近拦截量排序 · ${sources.length} 个来源`} action={<button className="panel-tool-button" disabled={sources.length === 0} onClick={() => setSourcesOpen(true)} title="展开全部来源" aria-label="展开全部来源" aria-haspopup="dialog"><Maximize2 size={17} /></button>} />
-        {sources.length === 0 ? <Empty text="Agent 上线后会显示来源 IP" /> : <div className="source-list">{sources.slice(0, 8).map((source, i) => {
+        <PanelHeader icon={<Zap size={21} />} title="高频入站来源" subtitle={`按当前入站连接与最近拦截量排序 · ${sources.length} 个来源`} action={<button className="panel-tool-button" disabled={sources.length === 0} onClick={() => setSourcesOpen(true)} title="展开全部入站来源" aria-label="展开全部入站来源" aria-haspopup="dialog"><Maximize2 size={17} /></button>} />
+        {sources.length === 0 ? <Empty text="Agent 上线后会显示入站来源 IP" /> : <div className="source-list">{sources.slice(0, 8).map((source, i) => {
           const total = source.connections + (source.dropped || 0)
           return <div className="source-row" key={source.ip}><span className="rank">{String(i + 1).padStart(2, '0')}</span><span className="source-ip">{source.ip}</span><span className="source-bar"><i style={{ width: `${Math.max(3, total / maxSource * 100)}%` }} /></span><span className="source-values"><strong>{formatNumber(source.connections)}</strong><small>{formatNumber(source.dropped || 0)} 丢弃</small></span></div>
         })}</div>}
@@ -211,10 +213,10 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
       </div>
     </section>
     <section className="panel fleet-panel">
-      <PanelHeader icon={<Cpu size={21} />} title="服务器状态" subtitle="实时负载、内存和连接压力" />
-	      <div className="table-wrap"><table><thead><tr><th>服务器</th><th>状态</th><th>公网地址</th><th>负载</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>拦截</th><th>策略</th></tr></thead><tbody>
-		{agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>{agent.os} / {agent.arch}</small></td><td><AgentStatus agent={agent} /></td><td><PublicAddresses agent={agent} /></td><td>{agent.telemetry ? agent.telemetry.load_1.toFixed(2) : '-'}</td><td>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td className="danger-text">{formatNumber(agent.telemetry?.dropped_total || 0)}</td><td>{agent.policy_name || '未下发'}</td></tr>)}
-        {agents.length === 0 && <tr><td colSpan={9}><Empty text="还没有服务器，前往服务器管理添加第一台" /></td></tr>}
+      <PanelHeader icon={<Cpu size={21} />} title="服务器状态" subtitle="实时速率、负载、内存和入站连接压力" />
+	      <div className="table-wrap"><table><thead><tr><th>服务器</th><th>状态</th><th>公网地址</th><th>实时速率</th><th>负载</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>拦截</th><th>策略</th></tr></thead><tbody>
+		{agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>{agent.os} / {agent.arch}</small></td><td><AgentStatus agent={agent} /></td><td><PublicAddresses agent={agent} /></td><td><NetworkRate agent={agent} /></td><td>{agent.telemetry ? agent.telemetry.load_1.toFixed(2) : '-'}</td><td>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td className="danger-text">{formatNumber(agent.telemetry?.dropped_total || 0)}</td><td>{agent.policy_name || '未下发'}</td></tr>)}
+        {agents.length === 0 && <tr><td colSpan={10}><Empty text="还没有服务器，前往服务器管理添加第一台" /></td></tr>}
       </tbody></table></div>
     </section>
     {sourcesOpen && <SourceDialog sources={sources} onClose={() => setSourcesOpen(false)} />}
@@ -234,7 +236,7 @@ function SourceDialog({ sources, onClose }: { sources: SourceCount[]; onClose: (
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1500)
   }
-  return <Modal wide title="全部连接来源" subtitle={`当前上报 ${sources.length} 个来源`} onClose={onClose}>
+  return <Modal wide title="全部入站连接来源" subtitle={`当前上报 ${sources.length} 个来源`} onClose={onClose}>
     <div className="source-dialog-toolbar"><label className="search-field"><Search size={17} /><span className="sr-only">搜索来源 IP</span><input autoFocus value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 IP 地址" /></label><span>{visibleSources.length} 个结果</span><button className="secondary-button" disabled={visibleSources.length === 0} onClick={() => void copyIPs()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? '已复制' : '复制 IP'}</button></div>
     <div className="table-wrap source-dialog-table"><table><thead><tr><th>排名</th><th>来源 IP</th><th>连接分布</th><th>当前连接</th><th>累计拦截</th></tr></thead><tbody>{visibleSources.map((source, index) => {
       const total = source.connections + (source.dropped || 0)
@@ -246,7 +248,11 @@ function SourceDialog({ sources, onClose }: { sources: SourceCount[]; onClose: (
 function Agents({ agents, onEnroll, onOpen, onRename, onDelete }: { agents: Agent[]; onEnroll: () => void; onOpen: (agent: Agent) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')
-  const [sort, setSort] = useState('name')
+  const [sort, setSort] = useState<AgentSortKey>(() => readAgentSort().key)
+  const [sortDirection, setSortDirection] = useState<SortDirection>(() => readAgentSort().direction)
+  useEffect(() => {
+    localStorage.setItem('mmwx-guard-agent-sort', JSON.stringify({ key: sort, direction: sortDirection }))
+  }, [sort, sortDirection])
   const visibleAgents = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return agents.filter(agent => {
@@ -254,18 +260,18 @@ function Agents({ agents, onEnroll, onOpen, onRename, onDelete }: { agents: Agen
       const protectedAgent = Boolean(agent.telemetry?.protected || agent.policy_name)
 			const matchesFilter = filter === 'all' || filter === agent.status || (filter === 'protected' && protectedAgent) || (filter === 'unprotected' && !protectedAgent) || (filter === 'attention' && agentNeedsAttention(agent)) || (filter === 'revoked' && agent.credential_state === 'revoked')
       return matchesQuery && matchesFilter
-    }).sort((left, right) => {
-      if (sort === 'connections') return (right.telemetry?.sockets.established || 0) - (left.telemetry?.sockets.established || 0)
-      if (sort === 'cpu') return (right.telemetry?.cpu_usage || 0) - (left.telemetry?.cpu_usage || 0)
-      return left.name.localeCompare(right.name, 'zh-CN')
-    })
-  }, [agents, filter, query, sort])
+    }).sort((left, right) => compareAgents(left, right, sort, sortDirection))
+  }, [agents, filter, query, sort, sortDirection])
+  const changeSort = (key: AgentSortKey) => {
+    setSort(key)
+    setSortDirection(key === 'name' ? 'asc' : 'desc')
+  }
   return <section className="panel management-panel">
     <div className="section-toolbar"><div><h2>服务器列表 ({visibleAgents.length} / {agents.length})</h2><p>进入服务器详情后独立设置防护、端口与可信入口</p></div><button className="primary-button" onClick={onEnroll}><Plus size={18} />添加服务器</button></div>
-		<div className="list-controls" role="search"><label className="search-field"><Search size={17} /><span className="sr-only">搜索服务器</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、IPv4、IPv6、系统或版本" /></label><label><SlidersHorizontal size={17} /><span className="sr-only">筛选状态</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部状态</option><option value="attention">需要处理</option><option value="online">在线</option><option value="offline">离线</option><option value="revoked">凭据已撤销</option><option value="protected">已配置防护</option><option value="unprotected">未配置防护</option></select></label><label><span className="sr-only">排序方式</span><select value={sort} onChange={event => setSort(event.target.value)}><option value="name">按名称排序</option><option value="connections">按连接数排序</option><option value="cpu">按 CPU 排序</option></select></label></div>
-	    <div className="table-wrap"><table className="agent-table"><thead><tr><th>名称</th><th>连接状态</th><th>公网地址</th><th>CPU</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>SYN 堆积</th><th>Conntrack</th><th>防护</th><th>操作</th></tr></thead><tbody>
-		{visibleAgents.map(agent => <tr key={agent.id}><td><button className="server-link" onClick={() => onOpen(agent)}><span><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></span><ChevronRight size={17} /></button><IntegrationBadges agent={agent} /></td><td><AgentStatus agent={agent} /></td><td><PublicAddresses agent={agent} /></td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name ? <span className="protection-label"><ShieldCheck size={14} />{agent.policy_name}</span> : <span className="muted">未配置</span>}</td><td><div className="row-actions"><button title="防护设置" aria-label={`打开 ${agent.name} 防护设置`} onClick={() => onOpen(agent)}><ShieldCheck size={18} /></button><button title="修改名称" aria-label={`修改 ${agent.name} 名称`} onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" aria-label={`删除 ${agent.name}`} className="danger" onClick={() => onDelete(agent)}><Trash2 size={18} /></button></div></td></tr>)}
-      {visibleAgents.length === 0 && <tr><td colSpan={11}><Empty text={agents.length === 0 ? '点击“添加服务器”生成一次性安装命令' : '没有符合筛选条件的服务器'} /></td></tr>}
+		<div className="list-controls" role="search"><label className="search-field"><Search size={17} /><span className="sr-only">搜索服务器</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、IPv4、IPv6、系统或版本" /></label><label><SlidersHorizontal size={17} /><span className="sr-only">筛选状态</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部状态</option><option value="attention">需要处理</option><option value="online">在线</option><option value="offline">离线</option><option value="revoked">凭据已撤销</option><option value="protected">已配置防护</option><option value="unprotected">未配置防护</option></select></label><div className="sort-controls"><label><span className="sr-only">排序方式</span><select value={sort} onChange={event => changeSort(event.target.value as AgentSortKey)}><option value="name">名称</option><option value="status">状态</option><option value="receive">接收速率</option><option value="transmit">发送速率</option><option value="cpu">CPU</option><option value="memory">内存</option><option value="connections">ESTABLISHED</option><option value="conntrack">Conntrack</option></select></label><button className="sort-direction" onClick={() => setSortDirection(current => current === 'asc' ? 'desc' : 'asc')} title={sortDirection === 'asc' ? '当前升序，点击切换为降序' : '当前降序，点击切换为升序'} aria-label={sortDirection === 'asc' ? '切换为降序' : '切换为升序'}>{sortDirection === 'asc' ? <ArrowUp size={17} /> : <ArrowDown size={17} />}</button></div></div>
+	    <div className="table-wrap"><table className="agent-table"><thead><tr><th>名称</th><th>连接状态</th><th>公网地址</th><th>实时速率</th><th>CPU</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>SYN 堆积</th><th>Conntrack</th><th>防护</th><th>操作</th></tr></thead><tbody>
+		{visibleAgents.map(agent => <tr key={agent.id}><td><button className="server-link" onClick={() => onOpen(agent)}><span><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></span><ChevronRight size={17} /></button><IntegrationBadges agent={agent} /></td><td><AgentStatus agent={agent} /></td><td><PublicAddresses agent={agent} /></td><td><NetworkRate agent={agent} /></td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name ? <span className="protection-label"><ShieldCheck size={14} />{agent.policy_name}</span> : <span className="muted">未配置</span>}</td><td><div className="row-actions"><button title="防护设置" aria-label={`打开 ${agent.name} 防护设置`} onClick={() => onOpen(agent)}><ShieldCheck size={18} /></button><button title="修改名称" aria-label={`修改 ${agent.name} 名称`} onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" aria-label={`删除 ${agent.name}`} className="danger" onClick={() => onDelete(agent)}><Trash2 size={18} /></button></div></td></tr>)}
+	      {visibleAgents.length === 0 && <tr><td colSpan={12}><Empty text={agents.length === 0 ? '点击“添加服务器”生成一次性安装命令' : '没有符合筛选条件的服务器'} /></td></tr>}
     </tbody></table></div>
   </section>
 }
@@ -369,12 +375,13 @@ function ServerOverview({ agent, policy }: { agent: Agent; policy: Policy | null
     <section className="detail-metrics">
       <Metric icon={<Cpu />} title="CPU" value={telemetry?.cpu_usage == null ? '-' : `${telemetry.cpu_usage.toFixed(1)}%`} detail={`Load ${telemetry?.load_1.toFixed(2) || '-'}`} tone="coral" />
       <Metric icon={<CircleGauge />} title="内存" value={telemetry ? percentage(telemetry.memory_used, telemetry.memory_total) : '-'} detail={telemetry ? `${formatMemory(telemetry.memory_used)} / ${formatMemory(telemetry.memory_total)}` : '-'} tone="blue" />
-      <Metric icon={<Network />} title="ESTABLISHED" value={formatNumber(telemetry?.sockets.established || 0)} detail="当前已建立 TCP 连接" tone="blue" />
-      <Metric icon={<Network />} title="TIME_WAIT" value={formatNumber(telemetry?.sockets.time_wait || 0)} detail="等待内核回收" tone="amber" />
+	      <Metric icon={<Network />} title="ESTABLISHED" value={formatNumber(telemetry?.sockets.established || 0)} detail="当前已建立 TCP 连接" tone="blue" />
+	      <Metric icon={<Network />} title="TIME_WAIT" value={formatNumber(telemetry?.sockets.time_wait || 0)} detail="等待内核回收" tone="amber" />
+	      <Metric icon={<Activity />} title="实时速率" value={telemetry?.network ? `收 ${formatNetworkRate(telemetry.network.receive_bytes_per_second)}` : '-'} detail={telemetry?.network ? `发 ${formatNetworkRate(telemetry.network.transmit_bytes_per_second)}` : '等待 Agent 上报'} tone="coral" />
     </section>
     <section className="detail-grid">
       <article className="panel detail-panel"><PanelHeader icon={<ShieldCheck size={21} />} title="当前防护" subtitle="只作用于这台服务器" /><dl className="detail-list"><div><dt>状态</dt><dd>{telemetry?.protected ? '已启用' : '未启用'}</dd></div><div><dt>保护端口</dt><dd className="mono">{protectedPorts.join(', ') || '-'}</dd></div><div><dt>整机新连接</dt><dd>{policy?.global.enabled ? `${policy.global.rate}/s · 突发 ${policy.global.burst}` : '关闭'}</dd></div><div><dt>累计拦截</dt><dd className="danger-text">{formatNumber(telemetry?.dropped_total || 0)}</dd></div></dl></article>
-      <article className="panel detail-panel"><PanelHeader icon={<Zap size={21} />} title="当前来源" subtitle="按连接数排序" />{telemetry?.top_sources?.length ? <div className="mini-source-list">{telemetry.top_sources.slice(0, 6).map(source => <div key={source.ip}><span className="mono">{source.ip}</span><strong>{formatNumber(source.connections)}</strong></div>)}</div> : <Empty text="暂无连接来源" />}</article>
+	      <article className="panel detail-panel"><PanelHeader icon={<Zap size={21} />} title="当前入站来源" subtitle="按入站连接数排序" />{telemetry?.top_sources?.length ? <div className="mini-source-list">{telemetry.top_sources.slice(0, 6).map(source => <div key={source.ip}><span className="mono">{source.ip}</span><strong>{formatNumber(source.connections)}</strong></div>)}</div> : <Empty text="暂无入站连接来源" />}</article>
     </section>
   </>
 }
@@ -821,7 +828,12 @@ function AgentStatus({ agent }: { agent: Agent }) {
 	return <Status status={agent.status} protected={agent.telemetry?.protected} />
 }
 function PublicAddresses({ agent }: { agent: Agent }) {
-	return <span className="public-addresses"><span><small>IPv4</small><b className="mono" title={agent.ipv4_address || '尚未探测到 IPv4'}>{agent.ipv4_address || '-'}</b></span><span><small>IPv6</small><b className="mono" title={agent.ipv6_address || '尚未探测到 IPv6'}>{agent.ipv6_address || '-'}</b></span></span>
+		return <span className="public-addresses"><span><small>IPv4</small><b className="mono" title={agent.ipv4_address || '尚未探测到 IPv4'}>{agent.ipv4_address || '-'}</b></span><span><small>IPv6</small><b className="mono" title={agent.ipv6_address || '尚未探测到 IPv6'}>{agent.ipv6_address || '-'}</b></span></span>
+}
+function NetworkRate({ agent }: { agent: Agent }) {
+	const network = agent.telemetry?.network
+	if (!network) return <span className="muted">-</span>
+	return <span className="network-rate"><span title="接收速率"><ArrowDown size={12} />{formatNetworkRate(network.receive_bytes_per_second)}</span><span title="发送速率"><ArrowUp size={12} />{formatNetworkRate(network.transmit_bytes_per_second)}</span></span>
 }
 function SecurityState({ ok, okText, waitingText }: { ok: boolean; okText: string; waitingText: string }) { return <span className={`security-state ${ok ? 'ok' : 'waiting'}`}>{ok ? <ShieldCheck size={15} /> : <AlertTriangle size={15} />}{ok ? okText : waitingText}</span> }
 function CredentialState({ state }: { state: Agent['credential_state'] }) { const values = { active: ['active', '有效'], rotation_pending: ['pending', '等待新凭据上线'], revoked: ['revoked', '已撤销'] } as const; const value = values[state] || values.active; return <span className={`credential-state ${value[0]}`}>{value[1]}</span> }
@@ -845,6 +857,13 @@ function aggregateSources(agents: Agent[]): SourceCount[] {
 function formatNumber(value: number) { return new Intl.NumberFormat('zh-CN', { notation: value >= 100000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value) }
 function percentage(used: number, total: number) { return total ? `${Math.round(used / total * 100)}%` : '-' }
 function formatMemory(bytes: number) { if (!bytes) return '-'; const gibibytes = bytes / 1024 ** 3; return gibibytes >= 1 ? `${gibibytes.toFixed(gibibytes >= 10 ? 0 : 1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB` }
+function formatNetworkRate(bytesPerSecond: number) {
+	const bitsPerSecond = Math.max(0, bytesPerSecond) * 8
+	if (bitsPerSecond >= 1_000_000_000) return `${(bitsPerSecond / 1_000_000_000).toFixed(1)} Gbps`
+	if (bitsPerSecond >= 1_000_000) return `${(bitsPerSecond / 1_000_000).toFixed(1)} Mbps`
+	if (bitsPerSecond >= 1_000) return `${(bitsPerSecond / 1_000).toFixed(1)} Kbps`
+	return `${Math.round(bitsPerSecond)} bps`
+}
 function formatTime(value: string) { if (!value) return '-'; return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
 function relativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return `${seconds}秒前`; if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`; return `${Math.floor(seconds / 86400)}天前` }
 function primaryAddress(agent: Agent) { return agent.ipv4_address || agent.ipv6_address || agent.ip_address }
@@ -875,6 +894,32 @@ function agentNeedsAttention(agent: Agent) {
 	if (agent.status !== 'online' || agent.credential_state !== 'active' || !agent.secure_channel || !agent.controller_verified_at) return true
 	if (!telemetry) return true
 	return (telemetry.cpu_usage || 0) >= 90 || (telemetry.memory_total > 0 && telemetry.memory_used / telemetry.memory_total >= .9) || (telemetry.conntrack_max > 0 && telemetry.conntrack / telemetry.conntrack_max >= .8) || telemetry.sockets.syn_recv >= 1000
+}
+
+function readAgentSort(): { key: AgentSortKey; direction: SortDirection } {
+	const keys: AgentSortKey[] = ['name', 'status', 'receive', 'transmit', 'cpu', 'memory', 'connections', 'conntrack']
+	try {
+		const value = JSON.parse(localStorage.getItem('mmwx-guard-agent-sort') || '{}') as { key?: AgentSortKey; direction?: SortDirection }
+		if (value.key && keys.includes(value.key) && (value.direction === 'asc' || value.direction === 'desc')) return { key: value.key, direction: value.direction }
+	} catch { /* Use the default when an old preference is malformed. */ }
+	return { key: 'name', direction: 'asc' }
+}
+
+function compareAgents(left: Agent, right: Agent, key: AgentSortKey, direction: SortDirection) {
+	const numericValue = (agent: Agent) => {
+		switch (key) {
+			case 'status': return agent.status === 'online' ? 1 : 0
+			case 'receive': return agent.telemetry?.network?.receive_bytes_per_second || 0
+			case 'transmit': return agent.telemetry?.network?.transmit_bytes_per_second || 0
+			case 'cpu': return agent.telemetry?.cpu_usage || 0
+			case 'memory': return agent.telemetry?.memory_total ? agent.telemetry.memory_used / agent.telemetry.memory_total : 0
+			case 'connections': return agent.telemetry?.sockets.established || 0
+			case 'conntrack': return agent.telemetry?.conntrack || 0
+			default: return 0
+		}
+	}
+	const comparison = key === 'name' ? left.name.localeCompare(right.name, 'zh-CN') : numericValue(left) - numericValue(right)
+	return (direction === 'asc' ? comparison : -comparison) || left.name.localeCompare(right.name, 'zh-CN')
 }
 
 function validatePolicy(policy: Policy) {

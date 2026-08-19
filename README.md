@@ -14,7 +14,7 @@
 - 面板批量更新 Agent，未重新上线时自动回滚
 - SQLite 管理员、会话、一次性注册令牌与事件审计
 - Agent 固定主控 Ed25519 身份，控制与遥测使用 X25519 + AES-256-GCM 端到端加密
-- Agent 凭据在线轮换、立即撤销和绑定原 Machine ID 的一次性重新配对
+- Agent 凭据在线轮换、立即撤销和绑定原 Agent 身份标识的一次性重新配对
 
 ## 安装主控
 
@@ -65,11 +65,11 @@ SHA-256 来自同一个 GitHub Release，它用于校验下载完整性，不是
 
 ## Agent 连接安全
 
-新 Agent 注册时通过 HTTPS 获取并固定主控 Ed25519 公钥。每次连接都会生成新的 X25519 临时密钥和 32 字节随机挑战；主控对 Agent ID、Machine ID、挑战和双方临时公钥组成的 transcript 签名。双方使用 HKDF-SHA256 派生方向独立的 AES-256-GCM 密钥，后续遥测、策略、更新和凭据轮换只在加密信封中传输。信封序号必须严格递增，重复或乱序消息会被拒绝。
+新 Agent 注册时通过 HTTPS 获取并固定主控 Ed25519 公钥。每次连接都会生成新的 X25519 临时密钥和 32 字节随机挑战；主控对 Agent ID、Agent 身份标识、挑战和双方临时公钥组成的 transcript 签名。双方使用 HKDF-SHA256 派生方向独立的 AES-256-GCM 密钥，后续遥测、策略、更新和凭据轮换只在加密信封中传输。信封序号必须严格递增，重复或乱序消息会被拒绝。
 
 主控升级期间仍允许旧 Agent 使用原有 TLS WebSocket，以便先升级主控、再逐台升级 Agent。旧连接在服务器详情中会明确显示为“TLS 兼容模式”，且不能在线轮换凭据。所有 Agent 升级完成后，应以面板“需要处理”筛选确认不存在兼容连接。
 
-主控身份文件位于 `/var/lib/mmwx-guard/controller-identity.key`，权限必须为 `0600`。备份主控数据库时必须同时备份此文件；恢复数据库却更换身份文件会被已固定旧指纹的 Agent 拒绝。Agent 的基础注册配置位于 `/etc/mmwx-guard/agent.json`，在线轮换后的凭据覆盖位于 `/var/lib/mmwx-guard/agent-credentials.json`，两者均不得复制或泄露。
+主控身份文件位于 `/var/lib/mmwx-guard/controller-identity.key`，权限必须为 `0600`。备份主控数据库时必须同时备份此文件；恢复数据库却更换身份文件会被已固定旧指纹的 Agent 拒绝。Agent 的基础注册配置位于 `/etc/mmwx-guard/agent.json`，身份标识位于 `/var/lib/mmwx-guard/machine-id`，在线轮换后的凭据覆盖位于 `/var/lib/mmwx-guard/agent-credentials.json`，这些文件均不得复制或泄露。
 
 ## 开发
 
@@ -88,7 +88,7 @@ go vet ./...
 
 - Agent 以 root 运行，仅用于读取内核遥测和管理专属 nftables 表。
 - Agent 初始凭据保存在 `/etc/mmwx-guard/agent.json`，在线轮换值保存在 `/var/lib/mmwx-guard/agent-credentials.json`，权限均为 `0600`。
-- 每份 Agent 凭据与首次注册机器的 Machine ID 绑定，复制 `agent.json` 到另一台机器会被主控拒绝。迁移机器时应删除旧记录并重新注册。
+- 每份 Agent 凭据与首次注册时生成的 Agent 身份标识绑定，复制配置到另一台机器会被主控拒绝。迁移机器时应删除旧记录并重新注册。
 - 新 Agent 使用独立的 `mmwx-guard-protection-agent.service`，不会覆盖妙妙屋原有 Agent 或授权守卫服务。
 - 更新请求只能引用固定发布仓库、语义版本和固定资产名。
 - 防护策略下发前运行 `nft -c`；安装 Agent 本身不会自动启用任何防护策略。

@@ -29,6 +29,13 @@ type SocketStats struct {
 	TimeWait    int `json:"time_wait"`
 }
 
+type NetworkStats struct {
+	ReceiveBytes           uint64 `json:"receive_bytes"`
+	TransmitBytes          uint64 `json:"transmit_bytes"`
+	ReceiveBytesPerSecond  uint64 `json:"receive_bytes_per_second"`
+	TransmitBytesPerSecond uint64 `json:"transmit_bytes_per_second"`
+}
+
 type MMWIntegration struct {
 	Active         bool              `json:"active"`
 	MasterURL      string            `json:"master_url,omitempty"`
@@ -74,6 +81,7 @@ type Telemetry struct {
 	Load5          float64       `json:"load_5"`
 	MemoryUsed     uint64        `json:"memory_used"`
 	MemoryTotal    uint64        `json:"memory_total"`
+	Network        NetworkStats  `json:"network"`
 	Sockets        SocketStats   `json:"sockets"`
 	Conntrack      uint64        `json:"conntrack"`
 	ConntrackMax   uint64        `json:"conntrack_max"`
@@ -97,6 +105,10 @@ func (t Telemetry) Validate(now time.Time) error {
 	}
 	if t.MemoryUsed > t.MemoryTotal || t.PolicyRevision < 0 {
 		return errors.New("telemetry memory or policy revision is invalid")
+	}
+	const maxNetworkBytesPerSecond = uint64(1 << 50)
+	if t.Network.ReceiveBytesPerSecond > maxNetworkBytesPerSecond || t.Network.TransmitBytesPerSecond > maxNetworkBytesPerSecond {
+		return errors.New("telemetry network rate is invalid")
 	}
 	if err := t.Sockets.validate(); err != nil {
 		return err

@@ -7,9 +7,9 @@
 | 来源 | 采用内容 | 在本项目中的实现 |
 | --- | --- | --- |
 | 妙妙屋、妙妙屋X | 像素视觉、顶部主导航、右上角头像菜单、服务器详情内分区操作 | 保持中文像素风；服务器详情按概览、防护、服务识别、连接安全、事件拆分 |
-| 妙妙屋X securechan | Ed25519 长期身份、X25519 临时密钥、HKDF、AES-GCM、序号防重放 | 独立实现于 `internal/protocol/secure.go`，绑定 Agent ID、Machine ID 和随机挑战 |
+| 妙妙屋X securechan | Ed25519 长期身份、X25519 临时密钥、HKDF、AES-GCM、序号防重放 | 独立实现于 `internal/protocol/secure.go`，绑定 Agent ID、Agent 身份标识和随机挑战 |
 | Beszel | Hub 身份挑战、Agent 主动连接、列表快速识别异常状态 | 主控签名握手、Agent 固定指纹；Agent 无需开放管理端口 |
-| Headscale | 一次性、过期、不可复用的注册授权，设备重新注册 | 注册令牌消费后失效；重新配对绑定原 Machine ID，保留服务器策略和事件 |
+| Headscale | 一次性、过期、不可复用的注册授权，设备重新注册 | 注册令牌消费后失效；重新配对绑定原 Agent 身份标识，保留服务器策略和事件 |
 | CrowdSec | 主控与执行端职责分离、事件审计、最小化执行端 API | Agent 只接受结构化策略、回滚、受校验更新和凭据轮换，不提供 Shell |
 
 ## 明确没有照搬

@@ -122,6 +122,17 @@ systemctl stop mmwx-guard-protection-agent.service 2>/dev/null || true
 install -d -m 0700 /etc/mmwx-guard /var/lib/mmwx-guard
 install -m 0755 "${tmp}" /usr/local/bin/mmwx-guard-agent
 
+# New installations use an Agent-owned identity so cloned VPS machine-id values cannot collide.
+# Existing and repair installations keep their established identity binding.
+if [[ "${repair}" = "0" && ! -s /etc/mmwx-guard/agent.json && ! -s /var/lib/mmwx-guard/machine-id ]]; then
+  machine_identity="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+  if [[ -z "${machine_identity}" ]]; then
+    machine_identity="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  fi
+  printf '%s\n' "${machine_identity}" >/var/lib/mmwx-guard/machine-id
+  chmod 0600 /var/lib/mmwx-guard/machine-id
+fi
+
 enroll_args=(--enroll-only --controller "${controller}" --token "${token}" --name "${name}")
 if [[ "${repair}" = "1" ]]; then
   enroll_args+=(--replace-credentials)

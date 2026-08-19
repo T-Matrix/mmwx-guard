@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,5 +197,34 @@ func TestAgentAddressRequiresCredentialsAndEchoesClientAddress(t *testing.T) {
 	server.handleAgentAddress(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid credential response = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestDuplicateMachineIdentityDoesNotConsumeEnrollment(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "guard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateAgent(t.Context(), store.NewAgent{ID: "existing-agent", Name: "Existing Server", MachineID: "cloned-machine-id", SecretHash: hashToken("existing-agent-secret")}); err != nil {
+		t.Fatal(err)
+	}
+	token := "0123456789abcdef0123456789abcdef"
+	if err := database.CreateEnrollment(t.Context(), hashToken(token), "New Server", "", time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: database}
+	body := `{"token":"` + token + `","name":"New Server","machine_id":"cloned-machine-id","os":"linux","arch":"amd64","version":"test"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/agent/enroll", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.handleAgentEnroll(response, request)
+
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "Existing Server") {
+		t.Fatalf("duplicate identity response = %d %s", response.Code, response.Body.String())
+	}
+	if _, err := database.Enrollment(t.Context(), hashToken(token)); err != nil {
+		t.Fatalf("duplicate identity consumed enrollment token: %v", err)
 	}
 }

@@ -25,6 +25,9 @@ type Collector struct {
 	cpuMu        sync.Mutex
 	lastCPU      cpuSample
 	hasCPU       bool
+	networkMu    sync.Mutex
+	lastNetwork  networkSample
+	hasNetwork   bool
 	discoveryMu  sync.Mutex
 	integrations model.Integrations
 	discoveredAt time.Time
@@ -35,10 +38,12 @@ func NewCollector(manager *firewall.Manager) *Collector {
 }
 
 func (c *Collector) Collect(ctx context.Context) model.Telemetry {
-	t := model.Telemetry{CollectedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	collectedAt := time.Now()
+	t := model.Telemetry{CollectedAt: collectedAt.UTC().Format(time.RFC3339Nano)}
 	t.CPUUsage = c.cpuUsage()
 	t.Load1, t.Load5 = loadAverage()
 	t.MemoryUsed, t.MemoryTotal = memoryUsage()
+	t.Network = c.networkUsage(collectedAt)
 	t.Conntrack = readUint("/proc/sys/net/netfilter/nf_conntrack_count")
 	t.ConntrackMax = readUint("/proc/sys/net/netfilter/nf_conntrack_max")
 	t.Sockets, t.TopSources = socketStats(ctx)
@@ -183,6 +188,80 @@ func readUint(path string) uint64 {
 	return value
 }
 
+type networkSample struct {
+	receiveBytes  uint64
+	transmitBytes uint64
+	collectedAt   time.Time
+}
+
+func (c *Collector) networkUsage(collectedAt time.Time) model.NetworkStats {
+	raw, err := os.ReadFile("/proc/net/dev")
+	if err != nil {
+		return model.NetworkStats{}
+	}
+	receive, transmit := parseNetworkCounters(string(raw))
+	current := networkSample{receiveBytes: receive, transmitBytes: transmit, collectedAt: collectedAt}
+
+	c.networkMu.Lock()
+	defer c.networkMu.Unlock()
+	previous, hasPrevious := c.lastNetwork, c.hasNetwork
+	c.lastNetwork, c.hasNetwork = current, true
+	stats := model.NetworkStats{ReceiveBytes: receive, TransmitBytes: transmit}
+	if !hasPrevious {
+		return stats
+	}
+	elapsed := current.collectedAt.Sub(previous.collectedAt)
+	stats.ReceiveBytesPerSecond = networkRate(previous.receiveBytes, current.receiveBytes, elapsed)
+	stats.TransmitBytesPerSecond = networkRate(previous.transmitBytes, current.transmitBytes, elapsed)
+	return stats
+}
+
+func networkRate(previous, current uint64, elapsed time.Duration) uint64 {
+	if current < previous || elapsed <= 0 {
+		return 0
+	}
+	return uint64(float64(current-previous) / elapsed.Seconds())
+}
+
+func parseNetworkCounters(raw string) (uint64, uint64) {
+	var receive, transmit uint64
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		line := scanner.Text()
+		name, counters, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if ignoredNetworkInterface(name) {
+			continue
+		}
+		fields := strings.Fields(counters)
+		if len(fields) < 9 {
+			continue
+		}
+		rx, rxErr := strconv.ParseUint(fields[0], 10, 64)
+		tx, txErr := strconv.ParseUint(fields[8], 10, 64)
+		if rxErr == nil && txErr == nil {
+			receive += rx
+			transmit += tx
+		}
+	}
+	return receive, transmit
+}
+
+func ignoredNetworkInterface(name string) bool {
+	if name == "" || name == "lo" {
+		return true
+	}
+	for _, prefix := range []string{"docker", "veth", "br-", "virbr", "cni", "flannel", "kube"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func socketStats(ctx context.Context) (model.SocketStats, []model.SourceCount) {
 	if runtime.GOOS != "linux" {
 		return model.SocketStats{}, nil
@@ -191,12 +270,29 @@ func socketStats(ctx context.Context) (model.SocketStats, []model.SourceCount) {
 	if err != nil {
 		return model.SocketStats{}, nil
 	}
-	var stats model.SocketStats
-	sources := map[string]int{}
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	return parseSocketStats(string(out))
+}
+
+func parseSocketStats(raw string) (model.SocketStats, []model.SourceCount) {
+	rows := make([][]string, 0)
+	listeners := make(map[uint16]bool)
+	scanner := bufio.NewScanner(strings.NewReader(raw))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 5 {
+			continue
+		}
+		rows = append(rows, fields)
+		if fields[0] == "LISTEN" {
+			if port := socketPort(fields[3]); port != 0 {
+				listeners[port] = true
+			}
+		}
+	}
+	var stats model.SocketStats
+	sources := map[string]int{}
+	for _, fields := range rows {
+		if fields[0] == "LISTEN" || !listeners[socketPort(fields[3])] {
 			continue
 		}
 		stats.Total++
@@ -210,9 +306,6 @@ func socketStats(ctx context.Context) (model.SocketStats, []model.SourceCount) {
 		case "TIME-WAIT":
 			stats.TimeWait++
 		}
-		if fields[0] == "LISTEN" {
-			continue
-		}
 		if ip := hostPart(fields[4]); ip != "" && ip != "*" {
 			sources[ip]++
 		}
@@ -223,6 +316,16 @@ func socketStats(ctx context.Context) (model.SocketStats, []model.SourceCount) {
 	}
 	sort.Slice(top, func(i, j int) bool { return top[i].Connections > top[j].Connections })
 	return stats, top
+}
+
+func socketPort(value string) uint16 {
+	if index := strings.LastIndex(strings.TrimSpace(value), ":"); index >= 0 {
+		port, err := strconv.ParseUint(strings.TrimSpace(value[index+1:]), 10, 16)
+		if err == nil {
+			return uint16(port)
+		}
+	}
+	return 0
 }
 
 func hostPart(value string) string {
@@ -299,7 +402,11 @@ func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 }
 
 func MachineID() string {
-	for _, path := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+	return machineIDFromFiles([]string{"/var/lib/mmwx-guard/machine-id", "/etc/machine-id", "/var/lib/dbus/machine-id"})
+}
+
+func machineIDFromFiles(paths []string) string {
+	for _, path := range paths {
 		if raw, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(raw)) != "" {
 			return strings.TrimSpace(string(raw))
 		}

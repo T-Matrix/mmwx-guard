@@ -287,14 +287,23 @@ function AgentSecurity({ agent, onChanged }: { agent: Agent; onChanged: () => vo
 	const [busy, setBusy] = useState(false)
 	const [error, setError] = useState('')
 	const [message, setMessage] = useState('')
+	const [rotationBaseline, setRotationBaseline] = useState<string | null>(null)
 	const [pairing, setPairing] = useState<{ install_command: string; expires_in_minutes: number } | null>(null)
 	const [copied, setCopied] = useState(false)
+	useEffect(() => {
+		if (rotationBaseline === null || !agent.credential_rotated_at || agent.credential_rotated_at === rotationBaseline) return
+		if (agent.status === 'online' && agent.secure_channel && agent.credential_state === 'active') {
+			setMessage('凭据轮换完成，Agent 已通过新凭据安全重连')
+			setRotationBaseline(null)
+		}
+	}, [agent.credential_rotated_at, agent.credential_state, agent.secure_channel, agent.status, rotationBaseline])
 	const rotate = async () => {
 		setBusy(true); setError(''); setMessage('')
+		setRotationBaseline(agent.credential_rotated_at || '')
 		try {
 			const result = await api<{ message: string }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/credentials/rotate`, { method: 'POST', body: '{}' })
 			setMessage(result.message); setRotateOpen(false); window.setTimeout(onChanged, 1800)
-		} catch (err) { setError((err as Error).message); setRotateOpen(false) }
+		} catch (err) { setRotationBaseline(null); setError((err as Error).message); setRotateOpen(false) }
 		finally { setBusy(false) }
 	}
 	const revoke = async () => {

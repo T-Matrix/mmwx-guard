@@ -93,9 +93,14 @@ CREATE TABLE IF NOT EXISTS events (
     data_json TEXT,
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_events_created ON events(id DESC);
-CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
-`
+	CREATE INDEX IF NOT EXISTS idx_events_created ON events(id DESC);
+	CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+	CREATE TRIGGER IF NOT EXISTS trim_events AFTER INSERT ON events
+	WHEN NEW.id % 100 = 0
+	BEGIN
+	    DELETE FROM events WHERE id < NEW.id - 10000;
+	END;
+	`
 	_, err := s.db.Exec(schema)
 	return err
 }
@@ -185,6 +190,14 @@ func (s *Store) AgentSecretHash(ctx context.Context, id string) (string, error) 
 		return "", ErrNotFound
 	}
 	return hash, err
+}
+
+func (s *Store) AgentCredentials(ctx context.Context, id string) (secretHash, machineID string, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT secret_hash,machine_id FROM agents WHERE id=?`, id).Scan(&secretHash, &machineID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrNotFound
+	}
+	return
 }
 
 func (s *Store) SetAgentConnected(ctx context.Context, id, ip, osName, arch, version string) error {
@@ -380,9 +393,15 @@ type Event struct {
 }
 
 func (s *Store) AddEvent(ctx context.Context, level, kind, agentID, message string, data any) error {
+	if len(message) > 4096 {
+		message = message[:4096]
+	}
 	var raw []byte
 	if data != nil {
 		raw, _ = json.Marshal(data)
+		if len(raw) > 64<<10 {
+			raw = []byte(`{"truncated":true}`)
+		}
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO events(level,kind,agent_id,message,data_json,created_at) VALUES(?,?,?,?,?,?)`, level, kind, agentID, message, string(raw), now())
 	return err

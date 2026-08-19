@@ -31,6 +31,21 @@ func TestRenameAgent(t *testing.T) {
 	}
 }
 
+func TestAgentCredentialsReturnsMachineBinding(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if err := storage.CreateAgent(context.Background(), NewAgent{ID: "agent-1", Name: "first", MachineID: "machine-1", SecretHash: "hash-1"}); err != nil {
+		t.Fatal(err)
+	}
+	hash, machineID, err := storage.AgentCredentials(context.Background(), "agent-1")
+	if err != nil || hash != "hash-1" || machineID != "machine-1" {
+		t.Fatalf("AgentCredentials() = %q, %q, %v", hash, machineID, err)
+	}
+}
+
 func TestSummarySeparatesEstablishedAndTimeWait(t *testing.T) {
 	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {

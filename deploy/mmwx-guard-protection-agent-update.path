@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for 妙妙屋X安全防护 Agent update requests
+
+[Path]
+PathExists=/var/lib/mmwx-guard/agent-update/request.json
+Unit=mmwx-guard-protection-agent-update.service
+
+[Install]
+WantedBy=multi-user.target

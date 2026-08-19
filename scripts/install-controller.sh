@@ -68,6 +68,10 @@ if ! id -u mmwx-guard >/dev/null 2>&1; then
 fi
 install -d -o mmwx-guard -g mmwx-guard -m 0750 /var/lib/mmwx-guard /var/lib/mmwx-guard/update
 install -d -o root -g root -m 0755 /usr/lib/mmwx-guard
+install -d -o root -g mmwx-guard -m 0750 /etc/mmwx-guard
+touch /etc/mmwx-guard/controller.env
+chown root:mmwx-guard /etc/mmwx-guard/controller.env
+chmod 0640 /etc/mmwx-guard/controller.env
 systemctl stop mmwx-guard.service 2>/dev/null || true
 install -m 0755 "${tmpdir}/mmwx-guard-linux-${arch}" /usr/local/bin/mmwx-guard
 install -m 0755 "${tmpdir}/mmwx-guard-agent-linux-amd64" /usr/lib/mmwx-guard/mmwx-guard-agent-linux-amd64
@@ -83,6 +87,7 @@ Wants=network-online.target
 Type=simple
 User=mmwx-guard
 Group=mmwx-guard
+EnvironmentFile=-/etc/mmwx-guard/controller.env
 ExecStart=/usr/local/bin/mmwx-guard --listen ${listen} --database /var/lib/mmwx-guard/controller.db --public-url ${public_url} --agent-dir /usr/lib/mmwx-guard --update-dir /var/lib/mmwx-guard/update --release-repo ${repository}
 Restart=always
 RestartSec=3s
@@ -90,12 +95,18 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateDevices=true
 ReadWritePaths=/var/lib/mmwx-guard
 StateDirectory=mmwx-guard
 StateDirectoryMode=0750
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 MemoryDenyWriteExecute=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -130,6 +141,8 @@ ProtectSystem=full
 ReadWritePaths=/usr/local/bin /usr/lib/mmwx-guard /var/lib/mmwx-guard
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
+RestrictSUIDSGID=true
+UMask=0077
 UNIT
 
 systemctl daemon-reload

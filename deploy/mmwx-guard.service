@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=mmwx-guard
 Group=mmwx-guard
+EnvironmentFile=-/etc/mmwx-guard/controller.env
 ExecStart=/usr/local/bin/mmwx-guard --listen 127.0.0.1:9080 --database /var/lib/mmwx-guard/controller.db --public-url https://mmwxfh.tty.mom --agent-dir /usr/lib/mmwx-guard --update-dir /var/lib/mmwx-guard/update --release-repo T-Matrix/mmwx-guard
 Restart=always
 RestartSec=3s
@@ -14,12 +15,18 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateDevices=true
 ReadWritePaths=/var/lib/mmwx-guard
 StateDirectory=mmwx-guard
 StateDirectoryMode=0750
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 MemoryDenyWriteExecute=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

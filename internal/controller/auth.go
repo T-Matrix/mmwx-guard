@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "请先登录")
 			return
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.sameOrigin(r) {
 			writeError(w, http.StatusForbidden, "请求来源验证失败")
 			return
 		}
@@ -58,22 +59,33 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
-func sameOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
+func (s *Server) sameOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
-		return true
+		if referer := strings.TrimSpace(r.Header.Get("Referer")); referer != "" {
+			if parsed, err := url.Parse(referer); err == nil {
+				origin = parsed.Scheme + "://" + parsed.Host
+			}
+		}
 	}
-	scheme := "http://"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https://"
+	if origin == "" {
+		return false
 	}
-	return strings.EqualFold(strings.TrimRight(origin, "/"), scheme+r.Host)
+	expected := s.publicURL
+	if expected == "" {
+		scheme := "http://"
+		if requestIsHTTPS(r) {
+			scheme = "https://"
+		}
+		expected = scheme + r.Host
+	}
+	return strings.EqualFold(strings.TrimRight(origin, "/"), strings.TrimRight(expected, "/"))
 }
 
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: token, Path: "/", Expires: expires,
-		HttpOnly: true, Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		HttpOnly: true, Secure: requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 	})
 }

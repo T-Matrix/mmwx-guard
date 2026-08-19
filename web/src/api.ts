@@ -4,6 +4,8 @@ export type Status = {
   admin: string
   name: string
   version: string
+	turnstile_enabled?: boolean
+	turnstile_site_key?: string
 }
 
 export type SourceCount = { ip: string; connections: number; dropped?: number }

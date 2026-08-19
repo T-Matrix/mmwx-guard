@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 type PortRule struct {
@@ -82,8 +83,8 @@ func (p *Policy) Normalize() {
 }
 
 func (p Policy) Validate() error {
-	if strings.TrimSpace(p.Name) == "" {
-		return errors.New("policy name is required")
+	if count := utf8.RuneCountInString(strings.TrimSpace(p.Name)); count < 1 || count > 80 {
+		return errors.New("policy name must contain 1 to 80 characters")
 	}
 	if len(p.Ports) > 64 {
 		return errors.New("a policy can protect at most 64 ports")
@@ -115,13 +116,22 @@ func (p Policy) Validate() error {
 			return err
 		}
 	}
+	if len(p.Global.ExemptPorts) > 256 {
+		return errors.New("a policy can exempt at most 256 ports")
+	}
 	if p.SynSentTimeout < 5 || p.SynSentTimeout > 120 {
 		return errors.New("SYN-SENT timeout must be between 5 and 120 seconds")
 	}
 	if p.SynRecvTimeout < 5 || p.SynRecvTimeout > 120 {
 		return errors.New("SYN-RECV timeout must be between 5 and 120 seconds")
 	}
+	if len(p.TrustedCIDRs) > 128 {
+		return errors.New("a policy can trust at most 128 IP ranges")
+	}
 	for _, raw := range p.TrustedCIDRs {
+		if len(raw) > 128 {
+			return errors.New("trusted IP or CIDR is too long")
+		}
 		if raw == "" {
 			continue
 		}

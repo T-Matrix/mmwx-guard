@@ -1,5 +1,20 @@
 package model
 
+import (
+	"errors"
+	"fmt"
+	"math"
+	"net/netip"
+	"strings"
+	"time"
+)
+
+const (
+	MaxTopSources   = 64
+	MaxMMWNodes     = 256
+	MaxForwardRules = 512
+)
+
 type SourceCount struct {
 	IP          string `json:"ip"`
 	Connections int    `json:"connections"`
@@ -67,6 +82,83 @@ type Telemetry struct {
 	PolicyRevision int64         `json:"policy_revision"`
 	TopSources     []SourceCount `json:"top_sources"`
 	Integrations   Integrations  `json:"integrations"`
+}
+
+func (t Telemetry) Validate(now time.Time) error {
+	collectedAt, err := time.Parse(time.RFC3339Nano, t.CollectedAt)
+	if err != nil {
+		return errors.New("telemetry collection timestamp is invalid")
+	}
+	if collectedAt.After(now.Add(2*time.Minute)) || now.Sub(collectedAt) > 5*time.Minute {
+		return errors.New("telemetry collection timestamp is outside the accepted window")
+	}
+	if !finiteBetween(t.CPUUsage, 0, 100) || !finiteBetween(t.Load1, 0, 1_000_000) || !finiteBetween(t.Load5, 0, 1_000_000) {
+		return errors.New("telemetry CPU or load value is invalid")
+	}
+	if t.MemoryUsed > t.MemoryTotal || t.PolicyRevision < 0 {
+		return errors.New("telemetry memory or policy revision is invalid")
+	}
+	if err := t.Sockets.validate(); err != nil {
+		return err
+	}
+	if t.ConntrackMax > 0 && t.Conntrack > t.ConntrackMax {
+		return errors.New("telemetry conntrack count exceeds its maximum")
+	}
+	if len(t.TopSources) > MaxTopSources {
+		return fmt.Errorf("telemetry has too many top sources: %d", len(t.TopSources))
+	}
+	for _, source := range t.TopSources {
+		if _, err := netip.ParseAddr(strings.TrimSpace(source.IP)); err != nil || source.Connections < 0 || source.Connections > t.Sockets.Total {
+			return errors.New("telemetry contains an invalid top source")
+		}
+	}
+	return t.Integrations.validate()
+}
+
+func (s SocketStats) validate() error {
+	const maxSocketCount = 100_000_000
+	values := []int{s.Total, s.Established, s.SynRecv, s.SynSent, s.TimeWait}
+	for _, value := range values {
+		if value < 0 || value > maxSocketCount {
+			return errors.New("telemetry socket count is invalid")
+		}
+	}
+	if s.Established > s.Total || s.SynRecv > s.Total || s.SynSent > s.Total || s.TimeWait > s.Total {
+		return errors.New("telemetry socket state exceeds total sockets")
+	}
+	return nil
+}
+
+func (i Integrations) validate() error {
+	if i.MMW != nil {
+		if !shortString(i.MMW.MasterURL, 2048) || !shortString(i.MMW.ConnectionMode, 128) || !shortString(i.MMW.XrayMode, 128) || len(i.MMW.Nodes) > MaxMMWNodes {
+			return errors.New("telemetry contains invalid MMW integration metadata")
+		}
+		for _, node := range i.MMW.Nodes {
+			if node.Port == 0 || !shortString(node.Tag, 512) || !shortString(node.Listen, 512) || !shortString(node.Protocol, 128) || !shortString(node.Network, 128) || !shortString(node.Security, 128) {
+				return errors.New("telemetry contains an invalid MMW node")
+			}
+		}
+	}
+	if i.ForwardX != nil {
+		if !shortString(i.ForwardX.PanelURL, 2048) || len(i.ForwardX.Rules) > MaxForwardRules {
+			return errors.New("telemetry contains invalid ForwardX integration metadata")
+		}
+		for _, rule := range i.ForwardX.Rules {
+			if rule.ListenPort == 0 || !shortString(rule.ID, 512) || !shortString(rule.Protocol, 128) || !shortString(rule.Listen, 512) || !shortString(rule.Remote, 512) {
+				return errors.New("telemetry contains an invalid ForwardX rule")
+			}
+		}
+	}
+	return nil
+}
+
+func finiteBetween(value, minimum, maximum float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= minimum && value <= maximum
+}
+
+func shortString(value string, maximum int) bool {
+	return len(value) <= maximum
 }
 
 type AgentSummary struct {

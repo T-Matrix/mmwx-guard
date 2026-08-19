@@ -11,10 +11,12 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -29,17 +31,32 @@ import (
 )
 
 type Server struct {
-	store     *store.Store
-	hub       *Hub
-	web       http.Handler
-	version   string
-	publicURL string
-	agentDir  string
-	updater   *updater.Manager
+	store        *store.Store
+	hub          *Hub
+	web          http.Handler
+	version      string
+	publicURL    string
+	agentDir     string
+	updater      *updater.Manager
+	login        *loginLimiter
+	turnstile    *turnstileVerifier
+	telemetryMu  sync.Mutex
+	telemetryAt  map[string]time.Time
+	connectionMu sync.Mutex
+	connectionAt map[string][]time.Time
+	proxyCIDRs   []netip.Prefix
 }
 
-func NewServer(database *store.Store, web http.Handler, version, publicURL, agentDir string, updateManager *updater.Manager) *Server {
-	return &Server{store: database, hub: NewHub(), web: web, version: version, publicURL: strings.TrimRight(publicURL, "/"), agentDir: agentDir, updater: updateManager}
+func NewServer(database *store.Store, web http.Handler, version, publicURL, agentDir string, updateManager *updater.Manager) (*Server, error) {
+	turnstile, err := turnstileFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	proxyCIDRs, err := proxyCIDRsFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return &Server{store: database, hub: NewHub(), web: web, version: version, publicURL: strings.TrimRight(publicURL, "/"), agentDir: agentDir, updater: updateManager, login: newLoginLimiter(), turnstile: turnstile, telemetryAt: make(map[string]time.Time), connectionAt: make(map[string][]time.Time), proxyCIDRs: proxyCIDRs}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -84,22 +101,39 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	admin, authenticated := s.currentAdmin(r)
-	writeJSON(w, http.StatusOK, map[string]any{"setup": setup, "authenticated": authenticated, "admin": admin, "name": "妙妙屋X安全防护", "version": s.version})
+	status := map[string]any{"setup": setup, "authenticated": authenticated, "admin": admin, "name": "妙妙屋X安全防护", "version": s.version, "turnstile_enabled": s.turnstile != nil}
+	if s.turnstile != nil {
+		status["turnstile_site_key"] = s.turnstile.siteKey
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "请求来源验证失败")
+		return
+	}
 	hasAdmin, err := s.store.HasAdmin(r.Context())
 	if err != nil || hasAdmin {
 		writeError(w, http.StatusConflict, "系统已经完成初始化")
 		return
 	}
-	var req struct{ Username, Password string }
+	var req struct {
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+		TurnstileToken string `json:"turnstile_token"`
+	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
-	if len(req.Username) < 3 || len(req.Password) < 10 {
-		writeError(w, http.StatusBadRequest, "管理员名称至少3位，密码至少10位")
+	if err := s.turnstile.verify(r.Context(), req.TurnstileToken, s.clientIP(r)); err != nil {
+		writeError(w, http.StatusForbidden, "人机验证失败，请重试")
+		return
+	}
+	usernameLength := utf8.RuneCountInString(req.Username)
+	if usernameLength < 3 || usernameLength > 80 || len(req.Password) < 10 || len(req.Password) > 72 {
+		writeError(w, http.StatusBadRequest, "管理员名称应为3到80个字符，密码应为10到72字节")
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
@@ -112,16 +146,51 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Username, Password string }
+	if !s.sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "请求来源验证失败")
+		return
+	}
+	var req struct {
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+		TurnstileToken string `json:"turnstile_token"`
+	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	s.createSession(w, r, strings.TrimSpace(req.Username), req.Password)
+	username := strings.TrimSpace(req.Username)
+	ip := s.clientIP(r)
+	limitUsername := username
+	if len(limitUsername) > 256 {
+		limitUsername = ""
+	}
+	if retryAfter, allowed := s.login.check(ip, limitUsername); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(retryAfter.Seconds()))))
+		_ = s.store.AddEvent(r.Context(), "warning", "login_limited", "", "管理员登录尝试已被限速", map[string]string{"ip": ip})
+		writeError(w, http.StatusTooManyRequests, "登录尝试过多，请稍后再试")
+		return
+	}
+	if len(username) > 256 || len(req.Password) > 1024 || s.turnstile.verify(r.Context(), req.TurnstileToken, ip) != nil {
+		s.login.failure(ip, limitUsername)
+		_ = s.store.AddEvent(r.Context(), "warning", "login_challenge_failed", "", "管理员人机验证失败", map[string]string{"ip": ip})
+		writeError(w, http.StatusForbidden, "人机验证失败，请重试")
+		return
+	}
+	s.createSession(w, r, username, req.Password)
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request, username, password string) {
+	ip := s.clientIP(r)
+	if retryAfter, allowed := s.login.check(ip, username); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(retryAfter.Seconds()))))
+		_ = s.store.AddEvent(r.Context(), "warning", "login_limited", "", "管理员登录尝试已被限速", map[string]string{"ip": ip})
+		writeError(w, http.StatusTooManyRequests, "登录尝试过多，请稍后再试")
+		return
+	}
 	adminID, hash, err := s.store.AdminPasswordHash(r.Context(), username)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		s.login.failure(ip, username)
+		_ = s.store.AddEvent(r.Context(), "warning", "login_failed", "", "管理员登录失败", map[string]string{"ip": ip})
 		time.Sleep(300 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
@@ -137,10 +206,16 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request, username,
 		return
 	}
 	setSessionCookie(w, r, token, expires)
+	s.login.success(ip, username)
+	_ = s.store.AddEvent(r.Context(), "info", "login_succeeded", "", "管理员登录成功", map[string]string{"ip": ip})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": username})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if !s.sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "请求来源验证失败")
+		return
+	}
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		_ = s.store.DeleteSession(r.Context(), hashToken(cookie.Value))
 	}
@@ -160,6 +235,10 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	if req.Label == "" {
 		req.Label = "新服务器"
 	}
+	if count := utf8.RuneCountInString(req.Label); count < 1 || count > 80 {
+		writeError(w, http.StatusBadRequest, "服务器名称长度应为 1 到 80 个字符")
+		return
+	}
 	if req.TTL < 5 || req.TTL > 1440 {
 		req.TTL = 30
 	}
@@ -171,7 +250,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	base := s.publicURL
 	if base == "" {
 		scheme := "http"
-		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		if requestIsHTTPS(r) {
 			scheme = "https"
 		}
 		base = scheme + "://" + r.Host
@@ -193,17 +272,27 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.MachineID = strings.TrimSpace(req.MachineID)
+	if len(req.Token) < 20 || len(req.Token) > 128 || req.MachineID == "" || len(req.MachineID) > 256 || utf8.RuneCountInString(req.Name) > 80 || len(req.OS) > 64 || len(req.Arch) > 64 || len(req.Version) > 128 {
+		writeError(w, http.StatusBadRequest, "Agent 机器标识无效")
+		return
+	}
 	label, err := s.store.ConsumeEnrollment(r.Context(), hashToken(req.Token))
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "安装令牌无效、已使用或已过期")
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" {
+	if req.Name == "" {
 		req.Name = label
 	}
-	id, _ := randomToken(12)
-	secret, _ := randomToken(32)
-	ip := clientIP(r)
+	id, idErr := randomToken(12)
+	secret, secretErr := randomToken(32)
+	if idErr != nil || secretErr != nil {
+		writeError(w, http.StatusInternalServerError, "生成 Agent 凭据失败")
+		return
+	}
+	ip := s.clientIP(r)
 	err = s.store.CreateAgent(r.Context(), store.NewAgent{ID: id, Name: req.Name, MachineID: req.MachineID, SecretHash: hashToken(secret), OS: req.OS, Arch: req.Arch, Version: req.Version, IPAddress: ip})
 	if err != nil {
 		writeError(w, http.StatusConflict, "这台机器已经注册，请先在面板删除旧记录")
@@ -216,17 +305,26 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("agent_id")
 	secret := bearerToken(r)
-	expected, err := s.store.AgentSecretHash(r.Context(), id)
+	if len(id) < 8 || len(id) > 128 || len(secret) < 20 || len(secret) > 128 {
+		writeError(w, http.StatusUnauthorized, "Agent 认证失败")
+		return
+	}
+	expected, expectedMachineID, err := s.store.AgentCredentials(r.Context(), id)
 	if err != nil || subtle.ConstantTimeCompare([]byte(hashToken(secret)), []byte(expected)) != 1 {
 		writeError(w, http.StatusUnauthorized, "Agent 认证失败")
 		return
 	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionContextTakeover})
+	if !s.acceptAgentConnection(id, time.Now()) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "Agent 重连过于频繁")
+		return
+	}
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "connection closed")
-	conn.SetReadLimit(2 << 20)
+	conn.SetReadLimit(protocol.MaxMessageBytes)
 	readCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	var first protocol.Message
 	err = wsjson.Read(readCtx, conn, &first)
@@ -236,8 +334,13 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var hello protocol.Hello
-	if json.Unmarshal(first.Payload, &hello) != nil {
+	if json.Unmarshal(first.Payload, &hello) != nil || protocol.ValidateFresh(first, time.Now(), 2*time.Minute) != nil || protocol.ValidateHello(hello) != nil {
 		_ = conn.Close(websocket.StatusInvalidFramePayloadData, "invalid hello")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(hello.MachineID), []byte(expectedMachineID)) != 1 {
+		_ = s.store.AddEvent(r.Context(), "error", "agent_identity_mismatch", id, "Agent 机器标识不匹配，连接已拒绝", map[string]string{"ip": s.clientIP(r)})
+		_ = conn.Close(websocket.StatusPolicyViolation, "machine identity mismatch")
 		return
 	}
 	s.hub.Register(id, conn)
@@ -247,7 +350,7 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.SetAgentOffline(context.Background(), id)
 		}
 	}()
-	_ = s.store.SetAgentConnected(r.Context(), id, clientIP(r), hello.OS, hello.Arch, hello.Version)
+	_ = s.store.SetAgentConnected(r.Context(), id, s.clientIP(r), hello.OS, hello.Arch, hello.Version)
 	_ = s.store.AddEvent(r.Context(), "info", "agent_online", id, "Agent 已连接", nil)
 	ack, _ := protocol.NewMessage(protocol.TypeHelloAck, "", map[string]string{"version": s.version})
 	writeCtx, stopWrite := context.WithTimeout(r.Context(), 10*time.Second)
@@ -266,26 +369,90 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 	}
+	var messageRate agentMessageRate
 	for {
 		var msg protocol.Message
 		if err := wsjson.Read(r.Context(), conn, &msg); err != nil {
 			return
 		}
+		if !messageRate.allow(time.Now()) {
+			_ = conn.Close(websocket.StatusPolicyViolation, "message rate exceeded")
+			return
+		}
+		if err := protocol.ValidateFresh(msg, time.Now(), 2*time.Minute); err != nil {
+			_ = conn.Close(websocket.StatusPolicyViolation, "stale or invalid message")
+			return
+		}
 		switch msg.Type {
 		case protocol.TypeTelemetry:
 			var value model.Telemetry
-			if json.Unmarshal(msg.Payload, &value) == nil {
+			if len(msg.Payload) > protocol.MaxTelemetryPayloadBytes || json.Unmarshal(msg.Payload, &value) != nil || value.Validate(time.Now()) != nil {
+				_ = conn.Close(websocket.StatusInvalidFramePayloadData, "invalid telemetry")
+				return
+			}
+			if s.acceptTelemetry(id, time.Now()) {
 				_ = s.store.UpdateTelemetry(r.Context(), id, value)
 			}
 		case protocol.TypeApplyResult, protocol.TypeUpdateResult:
 			var result protocol.ApplyResult
-			if json.Unmarshal(msg.Payload, &result) == nil {
+			if json.Unmarshal(msg.Payload, &result) == nil && protocol.ValidateResult(msg, result) == nil {
 				s.hub.Resolve(msg.RequestID, result)
 			}
 		case protocol.TypePong:
 			_ = s.store.TouchAgent(r.Context(), id)
 		}
 	}
+}
+
+type agentMessageRate struct {
+	window time.Time
+	count  int
+}
+
+func (r *agentMessageRate) allow(now time.Time) bool {
+	const (
+		messageWindow = time.Minute
+		maxMessages   = 60
+	)
+	if r.window.IsZero() || now.Sub(r.window) >= messageWindow {
+		r.window = now
+		r.count = 0
+	}
+	r.count++
+	return r.count <= maxMessages
+}
+
+func (s *Server) acceptTelemetry(agentID string, now time.Time) bool {
+	const minimumInterval = 4 * time.Second
+	s.telemetryMu.Lock()
+	defer s.telemetryMu.Unlock()
+	if previous, ok := s.telemetryAt[agentID]; ok && now.Sub(previous) < minimumInterval {
+		return false
+	}
+	s.telemetryAt[agentID] = now
+	return true
+}
+
+func (s *Server) acceptAgentConnection(agentID string, now time.Time) bool {
+	const (
+		connectionWindow = time.Minute
+		maxConnections   = 10
+	)
+	s.connectionMu.Lock()
+	defer s.connectionMu.Unlock()
+	previous := s.connectionAt[agentID]
+	kept := previous[:0]
+	for _, connectedAt := range previous {
+		if now.Sub(connectedAt) < connectionWindow {
+			kept = append(kept, connectedAt)
+		}
+	}
+	if len(kept) >= maxConnections {
+		s.connectionAt[agentID] = kept
+		return false
+	}
+	s.connectionAt[agentID] = append(kept, now)
+	return true
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
@@ -468,6 +635,10 @@ func (s *Server) handleDeployPolicy(w http.ResponseWriter, r *http.Request) {
 		AgentIDs []string `json:"agent_ids"`
 	}
 	if !decodeJSON(w, r, &req) || len(req.AgentIDs) == 0 {
+		return
+	}
+	if len(req.AgentIDs) > 200 {
+		writeError(w, http.StatusBadRequest, "一次最多下发到 200 台 Agent")
 		return
 	}
 	type deployResult struct {
@@ -653,22 +824,86 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func clientIP(r *http.Request) string {
+func (s *Server) clientIP(r *http.Request) string {
+	direct := directClientIP(r)
+	if !trustedProxyRequest(r) {
+		return direct
+	}
+	forwarded := forwardedIPs(r.Header.Get("X-Forwarded-For"))
+	if len(forwarded) == 0 {
+		return direct
+	}
+	upstream := forwarded[len(forwarded)-1]
+	if !prefixContains(s.proxyCIDRs, upstream) {
+		return upstream.String()
+	}
 	if value := validIP(r.Header.Get("CF-Connecting-IP")); value != "" {
 		return value
 	}
-	if value := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); value != "" {
-		for _, candidate := range strings.Split(value, ",") {
-			if value := validIP(candidate); value != "" {
-				return value
-			}
+	for index := len(forwarded) - 1; index >= 0; index-- {
+		if !prefixContains(s.proxyCIDRs, forwarded[index]) {
+			return forwarded[index].String()
 		}
 	}
+	return upstream.String()
+}
+
+func directClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil && validIP(host) != "" {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func forwardedIPs(value string) []netip.Addr {
+	parts := strings.Split(value, ",")
+	addresses := make([]netip.Addr, 0, len(parts))
+	for _, part := range parts {
+		if address, err := netip.ParseAddr(strings.TrimSpace(part)); err == nil {
+			addresses = append(addresses, address.Unmap())
+		}
+	}
+	return addresses
+}
+
+func prefixContains(prefixes []netip.Prefix, address netip.Addr) bool {
+	for _, prefix := range prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func proxyCIDRsFromEnv() ([]netip.Prefix, error) {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' })
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TRUSTED_PROXY_CIDRS entry %q", part)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || (trustedProxyRequest(r) && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https"))
+}
+
+func trustedProxyRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 func validIP(value string) string {
@@ -695,6 +930,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data:; font-src 'self'; style-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com")
 		next.ServeHTTP(w, r)
 	})
 }

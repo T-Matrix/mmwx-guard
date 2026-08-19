@@ -60,7 +60,10 @@ func main() {
 	}
 
 	updateManager := updater.NewManager(*releaseRepo, version, *updateDir)
-	server := controller.NewServer(database, webui.Handler(), version, *publicURL, *agentDir, updateManager)
+	server, err := controller.NewServer(database, webui.Handler(), version, *publicURL, *agentDir, updateManager)
+	if err != nil {
+		log.Fatalf("configure controller: %v", err)
+	}
 	httpServer := &http.Server{
 		Addr:              *listen,
 		Handler:           server.Handler(),
@@ -68,6 +71,7 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 	log.Printf("妙妙屋X安全防护 %s listening on %s", version, *listen)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

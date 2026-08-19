@@ -2,22 +2,24 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 
 import {
   Activity, AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, CircleGauge, Clipboard, Copy,
   Cable, Cpu, Download, ExternalLink, FileClock, Filter, ListFilter, LogOut, Moon,
-  Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, Save, Server, Settings2,
-  ShieldCheck, ShieldX, Sun, Trash2, X, Zap,
+  Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, Save, Search, Server, Settings2,
+  ShieldCheck, ShieldX, SlidersHorizontal, Sun, Trash2, X, Zap,
 } from 'lucide-react'
 import { api } from './api'
 import type { Agent, EventItem, MMWNode, Policy, PortRule, SourceCount, Status as SystemStatus, UpdateInfo } from './api'
 
 type Tab = 'overview' | 'agents' | 'events' | 'updates'
 type DetailTab = 'overview' | 'protection' | 'services' | 'events'
+type RouteState = { tab: Tab; agentID: string; detailTab: DetailTab }
 type Summary = { agents_total: number; agents_online: number; sockets: number; established: number; time_wait: number; conntrack: number; dropped: number; protected: number }
 type EditablePortRule = PortRule & { manual: boolean; source_rules: string[] }
 
 const defaultSummary: Summary = { agents_total: 0, agents_online: 0, sockets: 0, established: 0, time_wait: 0, conntrack: 0, dropped: 0, protected: 0 }
 
 function App() {
+  const initialRoute = useMemo(readRoute, [])
   const [status, setStatus] = useState<SystemStatus | null>(null)
-  const [tab, setTab] = useState<Tab>('overview')
+  const [tab, setTab] = useState<Tab>(initialRoute.tab)
   const [summary, setSummary] = useState<Summary>(defaultSummary)
   const [agents, setAgents] = useState<Agent[]>([])
   const [events, setEvents] = useState<EventItem[]>([])
@@ -25,7 +27,12 @@ function App() {
   const [error, setError] = useState('')
   const [enrollOpen, setEnrollOpen] = useState(false)
   const [renameAgent, setRenameAgent] = useState<Agent | null>(null)
-  const [selectedAgentID, setSelectedAgentID] = useState('')
+  const [selectedAgentID, setSelectedAgentID] = useState(initialRoute.agentID)
+  const [detailTab, setDetailTab] = useState<DetailTab>(initialRoute.detailTab)
+  const [deleteAgent, setDeleteAgent] = useState<Agent | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [logoutOpen, setLogoutOpen] = useState(false)
+  const [updateAvailable, setUpdateAvailable] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('mmwx-guard-theme') || 'pixel')
 
   useEffect(() => {
@@ -64,15 +71,29 @@ function App() {
 
   useEffect(() => { void loadStatus() }, [loadStatus])
   useEffect(() => {
+    const onPopState = () => {
+      const route = readRoute()
+      setTab(route.tab)
+      setSelectedAgentID(route.agentID)
+      setDetailTab(route.detailTab)
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+  useEffect(() => {
     if (!status?.authenticated) return
     void refresh()
     const timer = window.setInterval(() => void refresh(true), 5000)
     return () => window.clearInterval(timer)
   }, [status?.authenticated, refresh])
+  useEffect(() => {
+    if (!status?.authenticated) return
+    void api<UpdateInfo>('/api/admin/update').then(info => setUpdateAvailable(info.update_available)).catch(() => undefined)
+  }, [status?.authenticated])
 
   if (!status) return <LoadingScreen />
   if (!status.setup || !status.authenticated) {
-    return <AuthScreen setup={!status.setup} onAuthenticated={loadStatus} />
+    return <AuthScreen setup={!status.setup} turnstileSiteKey={status.turnstile_enabled ? status.turnstile_site_key || '' : ''} onAuthenticated={loadStatus} />
   }
 
   const logout = async () => {
@@ -81,30 +102,41 @@ function App() {
   }
 
   const selectedAgent = agents.find(agent => agent.id === selectedAgentID)
-  const navigate = (next: Tab) => {
-    setSelectedAgentID('')
-    setTab(next)
+  const navigate = (next: RouteState) => {
+    setTab(next.tab)
+    setSelectedAgentID(next.agentID)
+    setDetailTab(next.detailTab)
+    writeRoute(next)
   }
 
   return (
     <div className="app-shell">
-      <Header tab={tab} setTab={navigate} theme={theme} setTheme={setTheme} admin={status.admin} version={status.version} onLogout={logout} />
-      <main className="content">
+      <a className="skip-link" href="#main-content">跳到主要内容</a>
+      <Header tab={tab} setTab={next => navigate({ tab: next, agentID: '', detailTab: 'overview' })} theme={theme} setTheme={setTheme} admin={status.admin} version={status.version} updateAvailable={updateAvailable} onLogout={() => setLogoutOpen(true)} />
+      <main className="content" id="main-content">
         {error && <div className="alert-strip"><AlertTriangle size={18} />{error}<button onClick={() => setError('')} aria-label="关闭"><X size={16} /></button></div>}
-        {selectedAgent ? <ServerDetail agent={selectedAgent} events={events.filter(event => event.agent_id === selectedAgent.id)} onBack={() => setSelectedAgentID('')} onRename={() => setRenameAgent(selectedAgent)} onSaved={() => void refresh()} /> : <>
+        {selectedAgent ? <ServerDetail agent={selectedAgent} tab={detailTab} setTab={next => navigate({ tab: 'agents', agentID: selectedAgent.id, detailTab: next })} events={events.filter(event => event.agent_id === selectedAgent.id)} onBack={() => navigate({ tab: 'agents', agentID: '', detailTab: 'overview' })} onRename={() => setRenameAgent(selectedAgent)} onSaved={() => void refresh()} /> : <>
+          <PageTitle tab={tab} busy={busy} onRefresh={() => void refresh()} />
           {tab === 'overview' && <Overview summary={summary} agents={agents} events={events} />}
-          {tab === 'agents' && <Agents agents={agents} onEnroll={() => setEnrollOpen(true)} onOpen={agent => setSelectedAgentID(agent.id)} onRename={setRenameAgent} onDelete={async id => { await api(`/api/admin/agents/${id}`, { method: 'DELETE' }); void refresh() }} />}
+          {tab === 'agents' && <Agents agents={agents} onEnroll={() => setEnrollOpen(true)} onOpen={agent => navigate({ tab: 'agents', agentID: agent.id, detailTab: 'overview' })} onRename={setRenameAgent} onDelete={setDeleteAgent} />}
           {tab === 'events' && <Events events={events} agents={agents} />}
           {tab === 'updates' && <Updates currentVersion={status.version} agents={agents} onRefresh={() => void refresh(true)} />}
         </>}
       </main>
       {enrollOpen && <EnrollmentDialog onClose={() => setEnrollOpen(false)} />}
       {renameAgent && <RenameAgentDialog agent={renameAgent} onClose={() => setRenameAgent(null)} onSaved={() => { setRenameAgent(null); void refresh() }} />}
+      {deleteAgent && <ConfirmDialog title="删除服务器记录" description={`确定删除“${deleteAgent.name}”吗？在线 Agent 需要先停止，已有防护规则不会自动从服务器移除。`} confirmLabel="删除记录" busy={deleteBusy} danger onClose={() => setDeleteAgent(null)} onConfirm={async () => {
+        setDeleteBusy(true)
+        try { await api(`/api/admin/agents/${encodeURIComponent(deleteAgent.id)}`, { method: 'DELETE' }); setDeleteAgent(null); await refresh() }
+        catch (err) { setError((err as Error).message) }
+        finally { setDeleteBusy(false) }
+      }} />}
+      {logoutOpen && <ConfirmDialog title="退出登录" description="确定退出当前管理员会话吗？" confirmLabel="退出登录" onClose={() => setLogoutOpen(false)} onConfirm={async () => { await logout(); setLogoutOpen(false) }} />}
     </div>
   )
 }
 
-function Header({ tab, setTab, theme, setTheme, admin, version, onLogout }: { tab: Tab; setTab: (tab: Tab) => void; theme: string; setTheme: (theme: string) => void; admin: string; version: string; onLogout: () => void }) {
+function Header({ tab, setTab, theme, setTheme, admin, version, updateAvailable, onLogout }: { tab: Tab; setTab: (tab: Tab) => void; theme: string; setTheme: (theme: string) => void; admin: string; version: string; updateAvailable: boolean; onLogout: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const items: { id: Tab; label: string; icon: typeof Activity }[] = [
     { id: 'overview', label: '安全概览', icon: Activity },
@@ -130,7 +162,7 @@ function Header({ tab, setTab, theme, setTheme, admin, version, onLogout }: { ta
           </button>
           {menuOpen && <div className="user-dropdown" role="menu">
             <div className="user-summary"><img className="avatar large" src="/images/admin-avatar.webp" alt="" /><strong>{admin}</strong><small>管理员 · {version}</small></div>
-            <button role="menuitem" onClick={() => { setTab('updates'); setMenuOpen(false) }}><PackageCheck size={17} /><span>版本更新</span><small>{version}</small></button>
+            <button role="menuitem" onClick={() => { setTab('updates'); setMenuOpen(false) }}><PackageCheck size={17} /><span>版本更新{updateAvailable && <i className="update-dot" aria-label="有新版本" />}</span><small>{version}</small></button>
             <button role="menuitem" onClick={() => { setTheme(theme === 'pixel' ? 'gold' : 'pixel'); setMenuOpen(false) }}><Settings2 size={17} /><span>界面风格</span><small>{theme === 'pixel' ? '妙妙屋' : '金色'}</small></button>
             <button role="menuitem" className="logout-item" onClick={onLogout}><LogOut size={17} /><span>退出登录</span></button>
           </div>}
@@ -184,21 +216,38 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
   </>
 }
 
-function Agents({ agents, onEnroll, onOpen, onRename, onDelete }: { agents: Agent[]; onEnroll: () => void; onOpen: (agent: Agent) => void; onRename: (agent: Agent) => void; onDelete: (id: string) => Promise<void> }) {
+function Agents({ agents, onEnroll, onOpen, onRename, onDelete }: { agents: Agent[]; onEnroll: () => void; onOpen: (agent: Agent) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void }) {
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState('all')
+  const [sort, setSort] = useState('name')
+  const visibleAgents = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    return agents.filter(agent => {
+      const matchesQuery = !needle || [agent.name, agent.ip_address, agent.os, agent.version].some(value => value?.toLowerCase().includes(needle))
+      const protectedAgent = Boolean(agent.telemetry?.protected || agent.policy_name)
+      const matchesFilter = filter === 'all' || filter === agent.status || (filter === 'protected' && protectedAgent) || (filter === 'unprotected' && !protectedAgent)
+      return matchesQuery && matchesFilter
+    }).sort((left, right) => {
+      if (sort === 'connections') return (right.telemetry?.sockets.established || 0) - (left.telemetry?.sockets.established || 0)
+      if (sort === 'cpu') return (right.telemetry?.cpu_usage || 0) - (left.telemetry?.cpu_usage || 0)
+      return left.name.localeCompare(right.name, 'zh-CN')
+    })
+  }, [agents, filter, query, sort])
   return <section className="panel management-panel">
-    <div className="section-toolbar"><div><h2>服务器列表 ({agents.length})</h2><p>进入服务器详情后独立设置防护、端口与可信入口</p></div><button className="primary-button" onClick={onEnroll}><Plus size={18} />添加服务器</button></div>
+    <div className="section-toolbar"><div><h2>服务器列表 ({visibleAgents.length} / {agents.length})</h2><p>进入服务器详情后独立设置防护、端口与可信入口</p></div><button className="primary-button" onClick={onEnroll}><Plus size={18} />添加服务器</button></div>
+    <div className="list-controls" role="search"><label className="search-field"><Search size={17} /><span className="sr-only">搜索服务器</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、IP、系统或版本" /></label><label><SlidersHorizontal size={17} /><span className="sr-only">筛选状态</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部状态</option><option value="online">在线</option><option value="offline">离线</option><option value="protected">已配置防护</option><option value="unprotected">未配置防护</option></select></label><label><span className="sr-only">排序方式</span><select value={sort} onChange={event => setSort(event.target.value)}><option value="name">按名称排序</option><option value="connections">按连接数排序</option><option value="cpu">按 CPU 排序</option></select></label></div>
     <div className="table-wrap"><table className="agent-table"><thead><tr><th>名称</th><th>连接状态</th><th>公网 IP</th><th>CPU</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>SYN 堆积</th><th>Conntrack</th><th>防护</th><th>操作</th></tr></thead><tbody>
-      {agents.map(agent => <tr key={agent.id}><td><button className="server-link" onClick={() => onOpen(agent)}><span><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></span><ChevronRight size={17} /></button><IntegrationBadges agent={agent} /></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name ? <span className="protection-label"><ShieldCheck size={14} />{agent.policy_name}</span> : <span className="muted">未配置</span>}</td><td><div className="row-actions"><button title="防护设置" onClick={() => onOpen(agent)}><ShieldCheck size={18} /></button><button title="修改名称" onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" className="danger" onClick={() => void onDelete(agent.id)}><Trash2 size={18} /></button></div></td></tr>)}
-      {agents.length === 0 && <tr><td colSpan={11}><Empty text="点击“添加服务器”生成一次性安装命令" /></td></tr>}
+      {visibleAgents.map(agent => <tr key={agent.id}><td><button className="server-link" onClick={() => onOpen(agent)}><span><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></span><ChevronRight size={17} /></button><IntegrationBadges agent={agent} /></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name ? <span className="protection-label"><ShieldCheck size={14} />{agent.policy_name}</span> : <span className="muted">未配置</span>}</td><td><div className="row-actions"><button title="防护设置" aria-label={`打开 ${agent.name} 防护设置`} onClick={() => onOpen(agent)}><ShieldCheck size={18} /></button><button title="修改名称" aria-label={`修改 ${agent.name} 名称`} onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" aria-label={`删除 ${agent.name}`} className="danger" onClick={() => onDelete(agent)}><Trash2 size={18} /></button></div></td></tr>)}
+      {visibleAgents.length === 0 && <tr><td colSpan={11}><Empty text={agents.length === 0 ? '点击“添加服务器”生成一次性安装命令' : '没有符合筛选条件的服务器'} /></td></tr>}
     </tbody></table></div>
   </section>
 }
 
-function ServerDetail({ agent, events, onBack, onRename, onSaved }: { agent: Agent; events: EventItem[]; onBack: () => void; onRename: () => void; onSaved: () => void }) {
-  const [tab, setTab] = useState<DetailTab>('overview')
+function ServerDetail({ agent, tab, setTab, events, onBack, onRename, onSaved }: { agent: Agent; tab: DetailTab; setTab: (tab: DetailTab) => void; events: EventItem[]; onBack: () => void; onRename: () => void; onSaved: () => void }) {
   const [policy, setPolicy] = useState<Policy | null>(null)
   const [policyLoading, setPolicyLoading] = useState(true)
   const [policyError, setPolicyError] = useState('')
+  const [policyDirty, setPolicyDirty] = useState(false)
   useEffect(() => {
     let active = true
     setPolicyLoading(true)
@@ -212,15 +261,16 @@ function ServerDetail({ agent, events, onBack, onRename, onSaved }: { agent: Age
     { id: 'services', label: '服务与端口', icon: Radio },
     { id: 'events', label: '安全事件', icon: FileClock },
   ]
+  const canLeaveProtection = () => !policyDirty || window.confirm('防护设置还有未保存的修改，确定离开吗？')
   return <div className="server-detail">
-    <button className="back-button" onClick={onBack}><ArrowLeft size={17} />服务器管理</button>
+    <button className="back-button" onClick={() => { if (canLeaveProtection()) onBack() }}><ArrowLeft size={17} />服务器管理</button>
     <header className="server-heading">
       <div><div className="server-title"><h1>{agent.name}</h1><Status status={agent.status} protected={agent.telemetry?.protected} /><button className="plain-icon" onClick={onRename} title="修改名称" aria-label="修改服务器名称"><Pencil size={17} /></button></div><p><span className="mono">{agent.ip_address || '-'}</span><i />{agent.os} / {agent.arch}<i />Agent {agent.version || '-'}</p></div>
       <div className="server-heading-stats"><span><small>当前策略</small><strong>{agent.policy_name || '未配置'}</strong></span><span><small>最后上报</small><strong>{agent.last_seen ? relativeTime(agent.last_seen) : '-'}</strong></span></div>
     </header>
-    <nav className="detail-tabs" aria-label="服务器详情导航">{items.map(item => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}><item.icon size={17} />{item.label}</button>)}</nav>
+    <nav className="detail-tabs" aria-label="服务器详情导航">{items.map(item => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => { if (item.id === tab || canLeaveProtection()) setTab(item.id) }}><item.icon size={17} />{item.label}{item.id === 'protection' && policyDirty && <i className="dirty-dot" aria-label="有未保存修改" />}</button>)}</nav>
     {tab === 'overview' && <ServerOverview agent={agent} policy={policy} />}
-    {tab === 'protection' && (policyLoading ? <div className="panel loading-panel"><RefreshCw className="spin" size={22} />正在读取服务器防护设置...</div> : policyError ? <div className="alert-strip"><AlertTriangle size={18} />{policyError}</div> : <ProtectionEditor agent={agent} initialPolicy={policy} onSaved={saved => { setPolicy(saved); onSaved() }} />)}
+    {tab === 'protection' && (policyLoading ? <div className="panel loading-panel"><RefreshCw className="spin" size={22} />正在读取服务器防护设置...</div> : policyError ? <div className="alert-strip"><AlertTriangle size={18} />{policyError}</div> : <ProtectionEditor agent={agent} initialPolicy={policy} onDirtyChange={setPolicyDirty} onSaved={saved => { setPolicy(saved); onSaved() }} />)}
     {tab === 'services' && <ServicePorts agent={agent} />}
     {tab === 'events' && <Events events={events} agents={[agent]} />}
   </div>
@@ -243,20 +293,33 @@ function ServerOverview({ agent, policy }: { agent: Agent; policy: Policy | null
   </>
 }
 
-function ProtectionEditor({ agent, initialPolicy, onSaved }: { agent: Agent; initialPolicy: Policy | null; onSaved: (policy: Policy) => void }) {
+function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { agent: Agent; initialPolicy: Policy | null; onDirtyChange: (dirty: boolean) => void; onSaved: (policy: Policy) => void }) {
   const discovered = discoveredPorts(agent)
   const startingPolicy = initialPolicy || defaultAgentPolicy(agent.name, discovered)
   const [policy, setPolicy] = useState<Policy>(() => startingPolicy)
+  const [savedSnapshot, setSavedSnapshot] = useState(() => initialPolicy ? JSON.stringify(startingPolicy) : '')
   const [selectedSources, setSelectedSources] = useState<string[]>(() => discovered.filter(source => startingPolicy.ports.some(port => port.port === source.port)).map(source => source.key))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const dirty = JSON.stringify(policy) !== savedSnapshot
+
+  useEffect(() => {
+    onDirtyChange(dirty)
+    return () => onDirtyChange(false)
+  }, [dirty, onDirtyChange])
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
 
   const updatePort = (index: number, field: keyof PortRule, value: number | boolean) => setPolicy(current => ({ ...current, ports: current.ports.map((port, portIndex) => portIndex === index ? { ...port, [field]: value } : port) }))
   const toggleSource = (source: DiscoveredPort, checked: boolean) => {
     setSelectedSources(current => checked ? [...new Set([...current, source.key])] : current.filter(key => key !== source.key))
     setPolicy(current => {
-      if (checked) return current.ports.some(port => port.port === source.port) ? current : { ...current, ports: [...current.ports, newPortRule(source.port, false)] }
+      if (checked) return current.ports.some(port => port.port === source.port) ? current : { ...current, ports: [...current.ports, plainPortRule(source.port)] }
       const anotherSelected = discovered.some(item => item.port === source.port && item.key !== source.key && selectedSources.includes(item.key))
       return anotherSelected ? current : { ...current, ports: current.ports.filter(port => port.port !== source.port) }
     })
@@ -267,14 +330,18 @@ function ProtectionEditor({ agent, initialPolicy, onSaved }: { agent: Agent; ini
     setSelectedSources(current => current.filter(key => discovered.find(source => source.key === key)?.port !== port))
   }
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); setBusy(true); setError(''); setMessage('')
+    event.preventDefault(); setError(''); setMessage('')
+    const validationError = validatePolicy(policy)
+    if (validationError) { setError(validationError); return }
+    setBusy(true)
     try {
       const result = await api<{ policy: Policy; message: string }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/protection`, { method: 'PUT', body: JSON.stringify(policy) })
-      setPolicy(result.policy); setMessage('已保存并只应用到这台服务器'); onSaved(result.policy)
+      setPolicy(result.policy); setSavedSnapshot(JSON.stringify(result.policy)); setMessage('已保存并只应用到这台服务器'); onSaved(result.policy)
     } catch (err) { setError((err as Error).message) }
     finally { setBusy(false) }
   }
   return <form className="protection-page" onSubmit={submit}>
+    {!initialPolicy && <div className="info-strip"><ShieldCheck size={18} /><span><strong>推荐默认值，尚未应用</strong><small>检查端口和可信入口后，点击“保存并应用”才会在这台服务器启用。</small></span></div>}
     {error && <div className="alert-strip"><AlertTriangle size={18} />{error}</div>}
     {message && <div className="success-strip"><Check size={18} />{message}</div>}
     <section className="settings-section">
@@ -284,14 +351,14 @@ function ProtectionEditor({ agent, initialPolicy, onSaved }: { agent: Agent; ini
     <section className="settings-section">
       <div className="settings-heading"><div><h2>端口阈值</h2><p>超过弹性额度时只丢弃新的 TCP 握手</p></div></div>
       <div className="port-settings">{policy.ports.map((port, index) => <div className="port-editor" key={`${port.port}-${index}`}><div className="editor-title"><strong>TCP :{port.port}</strong><button type="button" onClick={() => removePort(index)} title="删除端口规则" aria-label={`删除端口 ${port.port} 规则`}><Trash2 size={17} /></button></div><div className="five-cols"><NumberField label="端口" value={port.port} onChange={value => updatePort(index, 'port', value)} /><NumberField label="单 IP 速率 /s" value={port.per_ip_rate} onChange={value => updatePort(index, 'per_ip_rate', value)} /><NumberField label="单 IP 突发" value={port.per_ip_burst} onChange={value => updatePort(index, 'per_ip_burst', value)} /><NumberField label="端口总速率 /s" value={port.aggregate_rate} onChange={value => updatePort(index, 'aggregate_rate', value)} /><NumberField label="端口总突发" value={port.aggregate_burst} onChange={value => updatePort(index, 'aggregate_burst', value)} /></div></div>)}
-        <button type="button" className="add-rule" onClick={() => setPolicy(current => ({ ...current, ports: [...current.ports, newPortRule(443, true)] }))}><Plus size={17} />增加手工端口</button>
+        <button type="button" className="add-rule" onClick={() => setPolicy(current => ({ ...current, ports: [...current.ports, plainPortRule(443)] }))}><Plus size={17} />增加手工端口</button>
       </div>
     </section>
     <section className="settings-section">
       <div className="settings-heading"><div><h2>整机与可信入口</h2><p>可信前置地址不受速率限制，管理端口始终排除</p></div><label className="switch-field"><input type="checkbox" checked={policy.global.enabled} onChange={event => setPolicy(current => ({ ...current, global: { ...current.global, enabled: event.target.checked } }))} /><span>整机规则</span></label></div>
       <div className="form-grid settings-fields"><label><span>策略名称</span><input value={policy.name} maxLength={80} onChange={event => setPolicy(current => ({ ...current, name: event.target.value }))} required /></label><NumberField label="整机 SYN 速率 /s" value={policy.global.rate} onChange={value => setPolicy(current => ({ ...current, global: { ...current.global, rate: value } }))} /><NumberField label="整机突发额度" value={policy.global.burst} onChange={value => setPolicy(current => ({ ...current, global: { ...current.global, burst: value } }))} /><label><span>永久排除端口</span><input value={policy.global.exempt_ports.join(',')} onChange={event => setPolicy(current => ({ ...current, global: { ...current.global, exempt_ports: event.target.value.split(',').map(Number).filter(Boolean) } }))} placeholder="22,48357" /></label><label className="full"><span>可信前置 IP / CIDR</span><textarea value={policy.trusted_cidrs.join('\n')} onChange={event => setPolicy(current => ({ ...current, trusted_cidrs: event.target.value.split(/[\s,]+/).filter(Boolean) }))} placeholder="每行一个，例如 212.17.236.133/32" /></label></div>
     </section>
-    <div className="settings-actions"><span>{agent.status === 'online' ? '保存后立即应用到当前服务器' : '服务器离线，暂时无法应用'}</span><button className="primary-button" disabled={busy || agent.status !== 'online'}><Save size={18} />{busy ? '正在应用...' : '保存并应用'}</button></div>
+    <div className="settings-actions"><span>{agent.status !== 'online' ? '服务器离线，暂时无法应用' : dirty ? '有未保存修改，保存后立即应用到当前服务器' : '当前设置已保存'}</span><button className="primary-button" disabled={busy || agent.status !== 'online' || !dirty}><Save size={18} />{busy ? '正在应用...' : '保存并应用'}</button></div>
   </form>
 }
 
@@ -310,8 +377,25 @@ function ServicePorts({ agent }: { agent: Agent }) {
 
 function Events({ events, agents }: { events: EventItem[]; agents: Agent[] }) {
   const names = Object.fromEntries(agents.map(a => [a.id, a.name]))
-  return <section className="panel management-panel"><div className="section-toolbar"><div><h2>安全事件 ({events.length})</h2><p>保留策略下发结果与 Agent 生命周期记录</p></div><button className="secondary-button"><Filter size={17} />全部事件</button></div>
-    <div className="table-wrap"><table><thead><tr><th>级别</th><th>时间</th><th>事件</th><th>服务器</th><th>类型</th></tr></thead><tbody>{events.map(event => <tr key={event.id}><td><EventLevel level={event.level} /></td><td>{formatTime(event.created_at)}</td><td>{event.message}</td><td>{names[event.agent_id || ''] || event.agent_id || '-'}</td><td className="mono">{event.kind}</td></tr>)}{events.length === 0 && <tr><td colSpan={5}><Empty text="暂无事件" /></td></tr>}</tbody></table></div>
+  const [query, setQuery] = useState('')
+  const [level, setLevel] = useState('all')
+  const [agentID, setAgentID] = useState('all')
+  const [kind, setKind] = useState('all')
+  const kinds = useMemo(() => [...new Set(events.map(event => event.kind))].sort(), [events])
+	const visibleEvents = useMemo(() => {
+		const needle = query.trim().toLowerCase()
+		return events.filter(event => {
+			const serverName = names[event.agent_id || ''] || event.agent_id || ''
+			const kindLabel = eventKindLabel(event.kind)
+			return (level === 'all' || event.level === level) &&
+				(agentID === 'all' || event.agent_id === agentID) &&
+				(kind === 'all' || event.kind === kind) &&
+				(!needle || `${event.message} ${serverName} ${event.kind} ${kindLabel}`.toLowerCase().includes(needle))
+		})
+  }, [agentID, events, kind, level, names, query])
+  return <section className="panel management-panel"><div className="section-toolbar"><div><h2>安全事件 ({visibleEvents.length} / {events.length})</h2><p>登录、策略下发与 Agent 生命周期审计</p></div><span className="toolbar-label"><Filter size={17} />筛选事件</span></div>
+    <div className="list-controls events-controls" role="search"><label className="search-field"><Search size={17} /><span className="sr-only">搜索事件</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索事件、服务器或类型" /></label><label><span className="sr-only">事件级别</span><select value={level} onChange={event => setLevel(event.target.value)}><option value="all">全部级别</option><option value="info">信息</option><option value="warning">警告</option><option value="error">失败</option></select></label>{agents.length > 1 && <label><span className="sr-only">服务器</span><select value={agentID} onChange={event => setAgentID(event.target.value)}><option value="all">全部服务器</option>{agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>}<label><span className="sr-only">事件类型</span><select value={kind} onChange={event => setKind(event.target.value)}><option value="all">全部类型</option>{kinds.map(value => <option key={value} value={value}>{eventKindLabel(value)}</option>)}</select></label></div>
+    <div className="table-wrap"><table><thead><tr><th>级别</th><th>时间</th><th>事件</th><th>服务器</th><th>类型</th></tr></thead><tbody>{visibleEvents.map(event => <tr key={event.id}><td><EventLevel level={event.level} /></td><td>{formatTime(event.created_at)}</td><td>{event.message}</td><td>{names[event.agent_id || ''] || event.agent_id || '-'}</td><td><span className="event-kind">{eventKindLabel(event.kind)}</span></td></tr>)}{visibleEvents.length === 0 && <tr><td colSpan={5}><Empty text={events.length === 0 ? '暂无事件' : '没有符合筛选条件的事件'} /></td></tr>}</tbody></table></div>
   </section>
 }
 
@@ -505,17 +589,80 @@ function DeployDialog({ policy, agents, onClose, onDone }: { policy: Policy; age
   </Modal>
 }
 
-function AuthScreen({ setup, onAuthenticated }: { setup: boolean; onAuthenticated: () => Promise<void> }) {
+function AuthScreen({ setup, turnstileSiteKey, onAuthenticated }: { setup: boolean; turnstileSiteKey: string; onAuthenticated: () => Promise<void> }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const submit = async (e: FormEvent) => { e.preventDefault(); setBusy(true); setError(''); try { await api(setup ? '/api/setup' : '/api/login', { method: 'POST', body: JSON.stringify({ username, password }) }); await onAuthenticated() } catch (err) { setError((err as Error).message) } finally { setBusy(false) } }
-  return <div className="auth-screen login-pixel-bg"><section className="auth-window"><header className="auth-card-header"><h1>{setup ? '欢迎使用妙妙屋X安全防护' : '登录妙妙屋X安全防护'}</h1><p>{setup ? '这是首次启动，请创建管理员账号' : '请输入管理员账号以访问安全防护后台'}</p></header><form onSubmit={submit}>{error && <div className="form-error">{error}</div>}<label><span>用户名</span><input autoFocus autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} placeholder="请输入用户名" /></label><label><span>密码</span><input type="password" autoComplete={setup ? 'new-password' : 'current-password'} value={password} onChange={e => setPassword(e.target.value)} placeholder={setup ? '至少 10 位' : '请输入密码'} /></label><button className="primary-button auth-submit" disabled={busy}>{busy ? (setup ? '创建中...' : '登录中...') : setup ? '创建管理员账号' : '登录'}</button></form></section></div>
+  const [turnstileToken, setTurnstileToken] = useState('')
+  const [challengeKey, setChallengeKey] = useState(0)
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setError('')
+    if (turnstileSiteKey && !turnstileToken) { setError('请先完成人机验证'); return }
+    setBusy(true)
+    try { await api(setup ? '/api/setup' : '/api/login', { method: 'POST', body: JSON.stringify({ username, password, turnstile_token: turnstileToken }) }); await onAuthenticated() }
+    catch (err) { setError((err as Error).message); setTurnstileToken(''); setChallengeKey(key => key + 1) }
+    finally { setBusy(false) }
+  }
+  return <div className="auth-screen login-pixel-bg"><section className="auth-window"><header className="auth-card-header"><img src="/images/logo.webp" alt="妙妙屋 Logo" /><h1>{setup ? '欢迎使用妙妙屋X安全防护' : '登录妙妙屋X安全防护'}</h1><p>{setup ? '这是首次启动，请创建管理员账号' : '请输入管理员账号以访问安全防护后台'}</p></header><form onSubmit={submit}>{error && <div className="form-error" role="alert">{error}</div>}<label><span>用户名</span><input autoFocus autoComplete="username" value={username} onChange={e => setUsername(e.target.value)} placeholder="请输入用户名" required /></label><label><span>密码</span><input type="password" autoComplete={setup ? 'new-password' : 'current-password'} value={password} onChange={e => setPassword(e.target.value)} placeholder={setup ? '至少 10 位' : '请输入密码'} required /></label>{turnstileSiteKey && <TurnstileWidget key={challengeKey} siteKey={turnstileSiteKey} onToken={setTurnstileToken} />}<button className="primary-button auth-submit" disabled={busy || Boolean(turnstileSiteKey && !turnstileToken)}>{busy ? (setup ? '创建中...' : '登录中...') : setup ? '创建管理员账号' : '登录'}</button></form></section></div>
+}
+
+type TurnstileAPI = {
+  render: (container: HTMLElement, options: Record<string, unknown>) => string
+  remove: (widgetID: string) => void
+}
+
+function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (token: string) => void }) {
+  const [container, setContainer] = useState<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!container) return
+    let active = true
+    let widgetID = ''
+    const render = () => {
+      const turnstile = (window as typeof window & { turnstile?: TurnstileAPI }).turnstile
+      if (!active || !turnstile) return
+      container.replaceChildren()
+      widgetID = turnstile.render(container, {
+        sitekey: siteKey, action: 'login', theme: 'auto', size: 'flexible',
+        callback: (token: string) => onToken(token),
+        'expired-callback': () => onToken(''),
+        'error-callback': () => onToken(''),
+      })
+    }
+    const existing = document.querySelector<HTMLScriptElement>('script[data-mmwx-turnstile]')
+    if (existing) {
+      if ((window as typeof window & { turnstile?: TurnstileAPI }).turnstile) render()
+      else existing.addEventListener('load', render, { once: true })
+    } else {
+      const script = document.createElement('script')
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+      script.async = true
+      script.defer = true
+      script.dataset.mmwxTurnstile = 'true'
+      script.addEventListener('load', render, { once: true })
+      document.head.appendChild(script)
+    }
+    return () => {
+      active = false
+      onToken('')
+      const turnstile = (window as typeof window & { turnstile?: TurnstileAPI }).turnstile
+      if (widgetID && turnstile) turnstile.remove(widgetID)
+    }
+  }, [container, onToken, siteKey])
+  return <div className="turnstile-slot" ref={setContainer} aria-label="Cloudflare 人机验证" />
 }
 
 function Modal({ title, subtitle, onClose, children, wide = false }: { title: string; subtitle: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
   return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}><section className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭"><X size={20} /></button></header><div className="modal-body">{children}</div></section></div>
+}
+
+function ConfirmDialog({ title, description, confirmLabel, busy = false, danger = false, onClose, onConfirm }: { title: string; description: string; confirmLabel: string; busy?: boolean; danger?: boolean; onClose: () => void; onConfirm: () => void | Promise<void> }) {
+  return <Modal title={title} subtitle="请确认本次操作" onClose={busy ? () => undefined : onClose}><div className="confirm-dialog"><AlertTriangle size={24} /><p>{description}</p><div className="dialog-actions"><button className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button className={danger ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => void onConfirm()}>{busy ? '正在处理...' : confirmLabel}</button></div></div></Modal>
 }
 
 function Metric({ icon, title, value, detail, tone }: { icon: ReactNode; title: string; value: string; detail: string; tone: string }) { return <article className={`metric ${tone}`}><div className="metric-head"><h2>{title}</h2><span>{icon}</span></div><p>{detail}</p><strong>{value}</strong></article> }
@@ -547,7 +694,8 @@ function formatTime(value: string) { if (!value) return '-'; return new Date(val
 function relativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return `${seconds}秒前`; if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`; return `${Math.floor(seconds / 86400)}天前` }
 function supportsTCP(protocol: string) { return protocol.toLowerCase() === 'tcp' || protocol.toLowerCase() === 'tcp+udp' }
 function forwardRuleKey(agentID: string, ruleID: string) { return `${agentID}:${ruleID}` }
-function newPortRule(port: number, manual: boolean): EditablePortRule { return { port, per_ip_rate: 100, per_ip_burst: 500, aggregate_rate: 300, aggregate_burst: 1500, enabled: true, manual, source_rules: [] } }
+function plainPortRule(port: number): PortRule { return { port, per_ip_rate: 100, per_ip_burst: 500, aggregate_rate: 300, aggregate_burst: 1500, enabled: true } }
+function newPortRule(port: number, manual: boolean): EditablePortRule { return { ...plainPortRule(port), manual, source_rules: [] } }
 
 type DiscoveredPort = { key: string; kind: 'mmw' | 'forwardx'; title: string; detail: string; port: number; active: boolean; tcp: boolean; icon: typeof Server }
 function discoveredPorts(agent: Agent): DiscoveredPort[] {
@@ -560,9 +708,60 @@ function discoveredPorts(agent: Agent): DiscoveredPort[] {
 }
 function nodeNetworkUsesTCP(network: string) { return !['kcp', 'mkcp', 'quic'].includes(network.toLowerCase()) }
 function defaultAgentPolicy(name: string, sources: DiscoveredPort[]): Policy {
-  const ports = [...new Set(sources.filter(source => source.tcp).map(source => source.port))].map(port => newPortRule(port, false))
+  const ports = [...new Set(sources.filter(source => source.tcp).map(source => source.port))].map(plainPortRule)
   return { id: 0, revision: 1, name: `${name} 防护`, enabled: true, ports, global: { rate: 800, burst: 4000, exempt_ports: [22, 48357], enabled: true }, trusted_cidrs: [], syn_sent_timeout: 15, syn_recv_timeout: 30 }
 }
 function formatListen(listen: string | undefined, port: number) { return `${listen || '0.0.0.0'}:${port}` }
+
+function validatePolicy(policy: Policy) {
+  if (!policy.name.trim()) return '请输入策略名称'
+  const ports = new Set<number>()
+  for (const rule of policy.ports) {
+    if (!Number.isInteger(rule.port) || rule.port < 1 || rule.port > 65535) return '端口必须是 1 到 65535 的整数'
+    if (ports.has(rule.port)) return `端口 ${rule.port} 重复，请合并为一条规则`
+    ports.add(rule.port)
+    if (!rule.enabled) continue
+    if (rule.per_ip_rate < 1 || rule.per_ip_burst < rule.per_ip_rate) return `端口 ${rule.port} 的单 IP 突发额度不能低于速率`
+    if (rule.aggregate_rate < rule.per_ip_rate) return `端口 ${rule.port} 的总速率不能低于单 IP 速率`
+    if (rule.aggregate_burst < rule.aggregate_rate) return `端口 ${rule.port} 的总突发额度不能低于总速率`
+  }
+  if (policy.global.enabled && (policy.global.rate < 1 || policy.global.burst < policy.global.rate)) return '整机突发额度不能低于整机 SYN 速率'
+  if (policy.global.exempt_ports.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) return '永久排除端口必须是 1 到 65535 的整数'
+  return ''
+}
+
+function eventKindLabel(kind: string) {
+  const labels: Record<string, string> = {
+    system_setup: '系统初始化', login_succeeded: '登录成功', login_failed: '登录失败', login_limited: '登录限速',
+    enrollment_created: '注册令牌', agent_enrolled: 'Agent 注册', agent_online: 'Agent 上线', agent_deleted: 'Agent 删除', agent_renamed: '名称修改',
+    agent_identity_mismatch: '身份异常', policy_saved: '策略保存', policy_deploy: '策略下发', agent_update: 'Agent 更新', controller_update_queued: '主控更新',
+  }
+  return labels[kind] || kind
+}
+
+function readRoute(): RouteState {
+  const params = new URLSearchParams(window.location.search)
+  const rawTab = params.get('view')
+  const rawDetail = params.get('section')
+  const tabs: Tab[] = ['overview', 'agents', 'events', 'updates']
+  const detailTabs: DetailTab[] = ['overview', 'protection', 'services', 'events']
+  const agentID = params.get('server') || ''
+  return {
+    tab: tabs.includes(rawTab as Tab) ? rawTab as Tab : agentID ? 'agents' : 'overview',
+    agentID,
+    detailTab: detailTabs.includes(rawDetail as DetailTab) ? rawDetail as DetailTab : 'overview',
+  }
+}
+
+function writeRoute(route: RouteState) {
+  const params = new URLSearchParams()
+  if (route.tab !== 'overview') params.set('view', route.tab)
+  if (route.agentID) {
+    params.set('server', route.agentID)
+    if (route.detailTab !== 'overview') params.set('section', route.detailTab)
+  }
+  const query = params.toString()
+  window.history.pushState(null, '', query ? `${window.location.pathname}?${query}` : window.location.pathname)
+}
 
 export default App

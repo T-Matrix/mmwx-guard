@@ -116,7 +116,17 @@ User=root
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+PrivateDevices=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mmwx-guard
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+CapabilityBoundingSet=CAP_NET_ADMIN
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
@@ -152,6 +162,8 @@ ProtectSystem=full
 ReadWritePaths=/usr/local/bin /var/lib/mmwx-guard
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
+RestrictSUIDSGID=true
+UMask=0077
 UNIT
 
 systemctl daemon-reload

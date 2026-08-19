@@ -1,0 +1,18 @@
+[Unit]
+Description=Apply a verified 妙妙屋X安全防护 Agent update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/mmwx-guard-agent --apply-agent-update --state-dir /var/lib/mmwx-guard --install-path /usr/local/bin/mmwx-guard-agent --service-name mmwx-guard-protection-agent.service
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/usr/local/bin /var/lib/mmwx-guard
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictSUIDSGID=true
+UMask=0077

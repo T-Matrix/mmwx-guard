@@ -1,0 +1,29 @@
+[Unit]
+Description=妙妙屋X安全防护 Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mmwx-guard-agent --config /etc/mmwx-guard/agent.json --state-dir /var/lib/mmwx-guard
+Restart=always
+RestartSec=3s
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+PrivateDevices=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mmwx-guard
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

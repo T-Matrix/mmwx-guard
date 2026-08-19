@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -45,6 +46,8 @@ type Client struct {
 	firewall  *firewall.Manager
 	collector *telemetrypkg.Collector
 	writeMu   sync.Mutex
+	seenMu    sync.Mutex
+	seen      map[string]time.Time
 }
 
 func LoadOrEnroll(ctx context.Context, options Options, controllerURL, token, name string) (*Client, error) {
@@ -69,8 +72,14 @@ func LoadOrEnroll(ctx context.Context, options Options, controllerURL, token, na
 			return nil, err
 		}
 	}
+	if err := validateControllerURL(cfg.ControllerURL); err != nil {
+		return nil, err
+	}
+	if cfg.AgentID == "" || cfg.Secret == "" {
+		return nil, errors.New("agent credentials are incomplete")
+	}
 	manager := firewall.NewManager(options.StateDir, options.DryRun)
-	return &Client{config: cfg, options: options, firewall: manager, collector: telemetrypkg.NewCollector(manager)}, nil
+	return &Client{config: cfg, options: options, firewall: manager, collector: telemetrypkg.NewCollector(manager), seen: make(map[string]time.Time)}, nil
 }
 
 func EnrollOnly(ctx context.Context, options Options, controllerURL, token, name string) error {
@@ -93,6 +102,9 @@ func EnrollOnly(ctx context.Context, options Options, controllerURL, token, name
 }
 
 func enroll(ctx context.Context, controllerURL, token, name, version string) (Config, error) {
+	if err := validateControllerURL(controllerURL); err != nil {
+		return Config{}, err
+	}
 	body := map[string]string{
 		"token": token, "name": name, "machine_id": telemetrypkg.MachineID(),
 		"os": runtime.GOOS, "arch": runtime.GOARCH, "version": version,
@@ -123,6 +135,26 @@ func enroll(ctx context.Context, controllerURL, token, name, version string) (Co
 		return Config{}, err
 	}
 	return Config{ControllerURL: strings.TrimRight(controllerURL, "/"), AgentID: result.AgentID, Secret: result.Secret, Name: name}, nil
+}
+
+func validateControllerURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return errors.New("controller URL must be an HTTPS origin without a path, query, or credentials")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" {
+		host := strings.ToLower(u.Hostname())
+		if host == "localhost" {
+			return nil
+		}
+		if address, parseErr := netip.ParseAddr(host); parseErr == nil && address.IsLoopback() {
+			return nil
+		}
+	}
+	return errors.New("controller URL must use HTTPS; HTTP is allowed only for localhost")
 }
 
 func saveConfig(path string, cfg Config) error {
@@ -179,7 +211,7 @@ func (c *Client) connect(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "agent reconnect")
-	conn.SetReadLimit(2 << 20)
+	conn.SetReadLimit(protocol.MaxMessageBytes)
 	hello, _ := protocol.NewMessage(protocol.TypeHello, "", protocol.Hello{
 		Name: c.config.Name, MachineID: telemetrypkg.MachineID(), OS: runtime.GOOS, Arch: runtime.GOARCH, Version: c.options.Version,
 	})
@@ -224,6 +256,10 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				log.Printf("write Agent health marker: %v", err)
 			}
 		case protocol.TypeApplyPolicy:
+			if err := c.acceptCommand(msg); err != nil {
+				c.sendResult(ctx, conn, protocol.TypeApplyResult, msg.RequestID, false, err.Error(), 0)
+				continue
+			}
 			var payload protocol.ApplyPolicy
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 				c.sendResult(ctx, conn, protocol.TypeApplyResult, msg.RequestID, false, "invalid policy payload", 0)
@@ -238,6 +274,10 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				c.sendResult(ctx, conn, protocol.TypeApplyResult, msg.RequestID, true, "policy applied", payload.Policy.Revision)
 			}
 		case protocol.TypeRollback:
+			if err := c.acceptCommand(msg); err != nil {
+				c.sendResult(ctx, conn, protocol.TypeApplyResult, msg.RequestID, false, err.Error(), 0)
+				continue
+			}
 			rollbackCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err := c.firewall.Rollback(rollbackCtx)
 			cancel()
@@ -247,6 +287,10 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				c.sendResult(ctx, conn, protocol.TypeApplyResult, msg.RequestID, true, "policy rolled back", 0)
 			}
 		case protocol.TypeUpdateAgent:
+			if err := c.acceptCommand(msg); err != nil {
+				c.sendResult(ctx, conn, protocol.TypeUpdateResult, msg.RequestID, false, err.Error(), 0)
+				continue
+			}
 			var payload protocol.AgentUpdate
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 				c.sendResult(ctx, conn, protocol.TypeUpdateResult, msg.RequestID, false, "invalid Agent update payload", 0)
@@ -265,6 +309,25 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			_ = c.write(ctx, conn, pong)
 		}
 	}
+}
+
+func (c *Client) acceptCommand(message protocol.Message) error {
+	now := time.Now()
+	if err := protocol.ValidateCommand(message, now); err != nil {
+		return err
+	}
+	c.seenMu.Lock()
+	defer c.seenMu.Unlock()
+	for requestID, seenAt := range c.seen {
+		if now.Sub(seenAt) > 5*time.Minute {
+			delete(c.seen, requestID)
+		}
+	}
+	if _, exists := c.seen[message.RequestID]; exists {
+		return errors.New("duplicate control request rejected")
+	}
+	c.seen[message.RequestID] = now
+	return nil
 }
 
 func (c *Client) sendResult(ctx context.Context, conn *websocket.Conn, resultType, requestID string, success bool, message string, revision int64) {

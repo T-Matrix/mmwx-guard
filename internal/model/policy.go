@@ -33,8 +33,6 @@ type Policy struct {
 	Ports          []PortRule `json:"ports"`
 	Global         GlobalRule `json:"global"`
 	TrustedCIDRs   []string   `json:"trusted_cidrs"`
-	SynSentTimeout int        `json:"syn_sent_timeout"`
-	SynRecvTimeout int        `json:"syn_recv_timeout"`
 	UpdatedAt      string     `json:"updated_at,omitempty"`
 }
 
@@ -50,8 +48,6 @@ func DefaultPolicy() Policy {
 		Global: GlobalRule{
 			Rate: 800, Burst: 4000, ExemptPorts: []uint16{22, 48357}, Enabled: true,
 		},
-		SynSentTimeout: 15,
-		SynRecvTimeout: 30,
 	}
 }
 
@@ -59,12 +55,6 @@ func (p *Policy) Normalize() {
 	p.Name = strings.TrimSpace(p.Name)
 	if p.Revision < 1 {
 		p.Revision = 1
-	}
-	if p.SynSentTimeout == 0 {
-		p.SynSentTimeout = 15
-	}
-	if p.SynRecvTimeout == 0 {
-		p.SynRecvTimeout = 30
 	}
 	if p.Ports == nil {
 		p.Ports = []PortRule{}
@@ -118,12 +108,6 @@ func (p Policy) Validate() error {
 	}
 	if len(p.Global.ExemptPorts) > 256 {
 		return errors.New("a policy can exempt at most 256 ports")
-	}
-	if p.SynSentTimeout < 5 || p.SynSentTimeout > 120 {
-		return errors.New("SYN-SENT timeout must be between 5 and 120 seconds")
-	}
-	if p.SynRecvTimeout < 5 || p.SynRecvTimeout > 120 {
-		return errors.New("SYN-RECV timeout must be between 5 and 120 seconds")
 	}
 	if len(p.TrustedCIDRs) > 128 {
 		return errors.New("a policy can trust at most 128 IP ranges")

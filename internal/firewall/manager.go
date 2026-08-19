@@ -66,12 +66,8 @@ func (m *Manager) Apply(ctx context.Context, policy model.Policy) error {
 		}
 		return fmt.Errorf("nft apply failed: %s", strings.TrimSpace(string(out)))
 	}
-	if err := m.writeSysctl("net.netfilter.nf_conntrack_tcp_timeout_syn_sent", policy.SynSentTimeout); err != nil {
-		return fmt.Errorf("apply SYN-SENT timeout: %w", err)
-	}
-	if err := m.writeSysctl("net.netfilter.nf_conntrack_tcp_timeout_syn_recv", policy.SynRecvTimeout); err != nil {
-		return fmt.Errorf("apply SYN-RECV timeout: %w", err)
-	}
+	// Keep host-wide kernel tuning under the server operator's control. This
+	// manager owns only its dedicated nftables table.
 	return m.persist(policy, rules)
 }
 
@@ -148,9 +144,4 @@ func (m *Manager) persist(policy model.Policy, rules string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(m.stateDir, "current-policy.json"), raw, 0600)
-}
-
-func (m *Manager) writeSysctl(name string, value int) error {
-	path := "/proc/sys/" + strings.ReplaceAll(name, ".", "/")
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", value)), 0644)
 }

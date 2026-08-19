@@ -72,8 +72,6 @@ export type Policy = {
   ports: PortRule[]
   global: { rate: number; burst: number; exempt_ports: number[]; enabled: boolean }
   trusted_cidrs: string[]
-  syn_sent_timeout: number
-  syn_recv_timeout: number
   updated_at?: string
 }
 

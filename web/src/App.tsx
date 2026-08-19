@@ -640,7 +640,7 @@ function PolicyDialog({ agents, onClose, onSaved }: { agents: Agent[]; onClose: 
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setBusy(true)
     const cleanPorts: PortRule[] = ports.map(({ manual: _manual, source_rules: _sourceRules, ...rule }) => rule)
-    const policy = { id: 0, revision: 1, name, enabled: true, ports: cleanPorts, global: { rate: globalRate, burst: globalBurst, exempt_ports: exemptPorts.split(',').map(Number).filter(Boolean), enabled: true }, trusted_cidrs: trusted.split(/[\s,]+/).filter(Boolean), syn_sent_timeout: 15, syn_recv_timeout: 30 }
+    const policy = { id: 0, revision: 1, name, enabled: true, ports: cleanPorts, global: { rate: globalRate, burst: globalBurst, exempt_ports: exemptPorts.split(',').map(Number).filter(Boolean), enabled: true }, trusted_cidrs: trusted.split(/[\s,]+/).filter(Boolean) }
     try { await api('/api/admin/policies', { method: 'POST', body: JSON.stringify(policy) }); onSaved() } finally { setBusy(false) }
   }
   return <Modal wide title="新建防护策略" subtitle="令牌桶允许短时突发，持续超额才会丢弃" onClose={onClose}>
@@ -816,7 +816,7 @@ function discoveredPorts(agent: Agent): DiscoveredPort[] {
 function nodeNetworkUsesTCP(network: string) { return !['kcp', 'mkcp', 'quic'].includes(network.toLowerCase()) }
 function defaultAgentPolicy(name: string, sources: DiscoveredPort[]): Policy {
   const ports = [...new Set(sources.filter(source => source.tcp).map(source => source.port))].map(plainPortRule)
-  return { id: 0, revision: 1, name: `${name} 防护`, enabled: true, ports, global: { rate: 800, burst: 4000, exempt_ports: [22, 48357], enabled: true }, trusted_cidrs: [], syn_sent_timeout: 15, syn_recv_timeout: 30 }
+  return { id: 0, revision: 1, name: `${name} 防护`, enabled: true, ports, global: { rate: 800, burst: 4000, exempt_ports: [22, 48357], enabled: true }, trusted_cidrs: [] }
 }
 function formatListen(listen: string | undefined, port: number) { return `${listen || '0.0.0.0'}:${port}` }
 

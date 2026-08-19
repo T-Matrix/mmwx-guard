@@ -398,12 +398,21 @@ function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { ag
     setBusy(true)
     try {
       const result = await api<{ policy: Policy; message: string }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/protection`, { method: 'PUT', body: JSON.stringify(policy) })
-      setPolicy(result.policy); setSavedSnapshot(JSON.stringify(result.policy)); setMessage('已保存并只应用到这台服务器'); onSaved(result.policy)
-    } catch (err) { setError((err as Error).message) }
+      setPolicy(result.policy); setSavedSnapshot(JSON.stringify(result.policy)); setMessage(dirty ? '配置已保存并成功下发到当前服务器' : '当前配置已重新下发到服务器'); onSaved(result.policy)
+    } catch (err) { setError(`配置未下发：${(err as Error).message}`) }
     finally { setBusy(false) }
   }
-  return <form className="protection-page" onSubmit={submit}>
-    {!initialPolicy && <div className="info-strip"><ShieldCheck size={18} /><span><strong>推荐默认值，尚未应用</strong><small>检查端口和可信入口后，点击“保存并应用”才会在这台服务器启用。</small></span></div>}
+  const applyStatus = agent.status !== 'online'
+    ? { tone: 'offline', text: '服务器离线，暂时无法下发' }
+    : error
+      ? { tone: 'error', text: error }
+      : dirty
+        ? { tone: 'dirty', text: '有未保存修改，点击后立即保存并下发' }
+        : message
+          ? { tone: 'success', text: message }
+          : { tone: 'ready', text: '配置已保存，可随时重新下发' }
+  return <form className="protection-page" onSubmit={submit} noValidate aria-busy={busy}>
+    {!initialPolicy && <div className="info-strip"><ShieldCheck size={18} /><span><strong>推荐默认值，尚未应用</strong><small>检查端口和可信入口后，点击“保存并下发”才会在这台服务器启用。</small></span></div>}
     {error && <div className="alert-strip"><AlertTriangle size={18} />{error}</div>}
     {message && <div className="success-strip"><Check size={18} />{message}</div>}
     <section className="settings-section">
@@ -420,7 +429,7 @@ function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { ag
       <div className="settings-heading"><div><h2>整机与可信入口</h2><p>可信前置地址不受速率限制，管理端口始终排除</p></div><label className="switch-field"><input type="checkbox" checked={policy.global.enabled} onChange={event => setPolicy(current => ({ ...current, global: { ...current.global, enabled: event.target.checked } }))} /><span>整机规则</span></label></div>
       <div className="form-grid settings-fields"><label><span>策略名称</span><input value={policy.name} maxLength={80} onChange={event => setPolicy(current => ({ ...current, name: event.target.value }))} required /></label><NumberField label="整机 SYN 速率 /s" value={policy.global.rate} onChange={value => setPolicy(current => ({ ...current, global: { ...current.global, rate: value } }))} /><NumberField label="整机突发额度" value={policy.global.burst} onChange={value => setPolicy(current => ({ ...current, global: { ...current.global, burst: value } }))} /><label><span>永久排除端口</span><input value={policy.global.exempt_ports.join(',')} onChange={event => setPolicy(current => ({ ...current, global: { ...current.global, exempt_ports: event.target.value.split(',').map(Number).filter(Boolean) } }))} placeholder="22,48357" /></label><label className="full"><span>可信前置 IP / CIDR</span><textarea value={policy.trusted_cidrs.join('\n')} onChange={event => setPolicy(current => ({ ...current, trusted_cidrs: event.target.value.split(/[\s,]+/).filter(Boolean) }))} placeholder="每行一个，例如 212.17.236.133/32" /></label></div>
     </section>
-    <div className="settings-actions"><span>{agent.status !== 'online' ? '服务器离线，暂时无法应用' : dirty ? '有未保存修改，保存后立即应用到当前服务器' : '当前设置已保存'}</span><button className="primary-button" disabled={busy || agent.status !== 'online' || !dirty}><Save size={18} />{busy ? '正在应用...' : '保存并应用'}</button></div>
+    <div className="settings-actions"><span className={`apply-status ${applyStatus.tone}`} role={error ? 'alert' : 'status'} aria-live="polite">{applyStatus.text}</span><button className="primary-button" disabled={busy || agent.status !== 'online'}>{dirty ? <Save size={17} /> : <RefreshCw size={17} />}{busy ? '正在下发...' : dirty ? '保存并下发' : '重新下发'}</button></div>
   </form>
 }
 

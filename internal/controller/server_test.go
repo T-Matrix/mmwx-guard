@@ -1,10 +1,13 @@
 package controller
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestClientIPPrefersCloudflareAddress(t *testing.T) {
@@ -15,6 +18,37 @@ func TestClientIPPrefersCloudflareAddress(t *testing.T) {
 	request.Header.Set("X-Forwarded-For", "104.251.231.10, 172.64.213.106")
 	if got := server.clientIP(request); got != "104.251.231.10" {
 		t.Fatalf("clientIP() = %q, want real Cloudflare client IP", got)
+	}
+}
+
+func TestDummyPasswordHashIsValid(t *testing.T) {
+	if cost, err := bcrypt.Cost([]byte(dummyPasswordHash)); err != nil || cost != 12 {
+		t.Fatalf("dummy password hash cost = %d, %v", cost, err)
+	}
+}
+
+func TestSecurityHeadersEnableHSTSOnlyForHTTPS(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for _, test := range []struct {
+		name, url, remote, proto string
+		wantHSTS                 bool
+	}{
+		{name: "direct HTTP", url: "http://guard.example.com", remote: "198.51.100.1:1234"},
+		{name: "loopback HTTPS proxy", url: "http://guard.example.com", remote: "127.0.0.1:1234", proto: "https", wantHSTS: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest("GET", test.url, nil)
+			request.RemoteAddr = test.remote
+			request.Header.Set("X-Forwarded-Proto", test.proto)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if got := response.Header().Get("Strict-Transport-Security") != ""; got != test.wantHSTS {
+				t.Fatalf("HSTS present = %v, want %v", got, test.wantHSTS)
+			}
+			if response.Header().Get("Cross-Origin-Opener-Policy") != "same-origin" || response.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" {
+				t.Fatal("cross-origin isolation headers are missing")
+			}
+		})
 	}
 }
 

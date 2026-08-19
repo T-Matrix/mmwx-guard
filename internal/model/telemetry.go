@@ -162,16 +162,23 @@ func shortString(value string, maximum int) bool {
 }
 
 type AgentSummary struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Status         string     `json:"status"`
-	IPAddress      string     `json:"ip_address"`
-	OS             string     `json:"os"`
-	Arch           string     `json:"arch"`
-	Version        string     `json:"version"`
-	LastSeen       string     `json:"last_seen"`
-	PolicyID       int64      `json:"policy_id,omitempty"`
-	PolicyName     string     `json:"policy_name,omitempty"`
-	PolicyRevision int64      `json:"policy_revision,omitempty"`
-	Telemetry      *Telemetry `json:"telemetry,omitempty"`
+	ID                       string     `json:"id"`
+	Name                     string     `json:"name"`
+	Status                   string     `json:"status"`
+	IPAddress                string     `json:"ip_address"`
+	OS                       string     `json:"os"`
+	Arch                     string     `json:"arch"`
+	Version                  string     `json:"version"`
+	LastSeen                 string     `json:"last_seen"`
+	PolicyID                 int64      `json:"policy_id,omitempty"`
+	PolicyName               string     `json:"policy_name,omitempty"`
+	PolicyRevision           int64      `json:"policy_revision,omitempty"`
+	Telemetry                *Telemetry `json:"telemetry,omitempty"`
+	CredentialState          string     `json:"credential_state"`
+	CredentialRotatedAt      string     `json:"credential_rotated_at,omitempty"`
+	CredentialRevokedAt      string     `json:"credential_revoked_at,omitempty"`
+	LastAuthenticatedAt      string     `json:"last_authenticated_at,omitempty"`
+	ControllerKeyFingerprint string     `json:"controller_key_fingerprint,omitempty"`
+	ControllerVerifiedAt     string     `json:"controller_verified_at,omitempty"`
+	SecureChannel            bool       `json:"secure_channel"`
 }

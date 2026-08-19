@@ -42,12 +42,14 @@ set -euo pipefail
 controller=""
 token=""
 name=""
+repair="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --controller) controller="${2:-}"; shift 2 ;;
     --token) token="${2:-}"; shift 2 ;;
     --name) name="${2:-}"; shift 2 ;;
+    --repair) repair="1"; shift ;;
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
 done
@@ -85,21 +87,46 @@ if ! command -v curl >/dev/null 2>&1 || ! command -v nft >/dev/null 2>&1; then
   fi
 fi
 
-tmp="$(mktemp)"
-trap 'rm -f "${tmp}"' EXIT
+tmpdir="$(mktemp -d)"
+tmp="${tmpdir}/mmwx-guard-agent"
+backup="${tmpdir}/previous-agent"
+service_was_active="0"
+binary_backed_up="0"
+cleanup() {
+  status="$?"
+  trap - EXIT
+  if [[ "${status}" -ne 0 ]]; then
+    if [[ "${binary_backed_up}" = "1" ]]; then
+      install -m 0755 "${backup}" /usr/local/bin/mmwx-guard-agent
+    fi
+    if [[ "${service_was_active}" = "1" ]]; then
+      systemctl start mmwx-guard-protection-agent.service 2>/dev/null || true
+    fi
+  fi
+  rm -rf "${tmpdir}"
+  exit "${status}"
+}
+trap cleanup EXIT
 curl -fL --retry 3 --connect-timeout 10 \
   "${controller%/}/downloads/mmwx-guard-agent-linux-${arch}" -o "${tmp}"
 chmod 0755 "${tmp}"
 
+if systemctl is-active --quiet mmwx-guard-protection-agent.service; then
+  service_was_active="1"
+fi
+if [[ -x /usr/local/bin/mmwx-guard-agent ]]; then
+  cp -p /usr/local/bin/mmwx-guard-agent "${backup}"
+  binary_backed_up="1"
+fi
 systemctl stop mmwx-guard-protection-agent.service 2>/dev/null || true
 install -d -m 0700 /etc/mmwx-guard /var/lib/mmwx-guard
 install -m 0755 "${tmp}" /usr/local/bin/mmwx-guard-agent
 
-/usr/local/bin/mmwx-guard-agent \
-  --enroll-only \
-  --controller "${controller}" \
-  --token "${token}" \
-  --name "${name}"
+enroll_args=(--enroll-only --controller "${controller}" --token "${token}" --name "${name}")
+if [[ "${repair}" = "1" ]]; then
+  enroll_args+=(--replace-credentials)
+fi
+/usr/local/bin/mmwx-guard-agent "${enroll_args[@]}"
 
 cat >/etc/systemd/system/mmwx-guard-protection-agent.service <<'UNIT'
 [Unit]

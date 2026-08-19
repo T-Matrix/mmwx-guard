@@ -23,6 +23,7 @@ func main() {
 	publicURL := flag.String("public-url", "", "public controller URL used in Agent install commands")
 	agentDir := flag.String("agent-dir", "/usr/lib/mmwx-guard", "directory containing Agent binaries")
 	updateDir := flag.String("update-dir", "/var/lib/mmwx-guard/update", "controller update request and status directory")
+	identityKeyPath := flag.String("identity-key", "/var/lib/mmwx-guard/controller-identity.key", "controller Ed25519 identity seed path")
 	releaseRepo := flag.String("release-repo", updater.DefaultRepository, "GitHub repository used for updates")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	applyUpdate := flag.Bool("apply-update", false, "apply a queued controller update and exit")
@@ -60,7 +61,7 @@ func main() {
 	}
 
 	updateManager := updater.NewManager(*releaseRepo, version, *updateDir)
-	server, err := controller.NewServer(database, webui.Handler(), version, *publicURL, *agentDir, updateManager)
+	server, err := controller.NewServer(database, webui.Handler(), version, *publicURL, *agentDir, *identityKeyPath, updateManager)
 	if err != nil {
 		log.Fatalf("configure controller: %v", err)
 	}

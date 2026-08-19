@@ -6,6 +6,7 @@ export type Status = {
   version: string
 	turnstile_enabled?: boolean
 	turnstile_site_key?: string
+	controller_fingerprint?: string
 }
 
 export type SourceCount = { ip: string; connections: number; dropped?: number }
@@ -45,6 +46,13 @@ export type Agent = {
   policy_name?: string
   policy_revision?: number
   telemetry?: Telemetry
+	credential_state: 'active' | 'rotation_pending' | 'revoked'
+	credential_rotated_at?: string
+	credential_revoked_at?: string
+	last_authenticated_at?: string
+	controller_key_fingerprint?: string
+	controller_verified_at?: string
+	secure_channel: boolean
 }
 
 export type PortRule = {

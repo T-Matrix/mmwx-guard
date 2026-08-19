@@ -1,15 +1,15 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, CircleGauge, Clipboard, Copy,
-  Cable, Cpu, Download, ExternalLink, FileClock, Filter, ListFilter, LogOut, Moon,
-  Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, Save, Search, Server, Settings2,
+  Cable, Cpu, Download, ExternalLink, FileClock, Filter, KeyRound, Link2, Link2Off, ListFilter, LockKeyhole, LogOut, Moon,
+  Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, RotateCw, Save, Search, Server, Settings2,
   ShieldCheck, ShieldX, SlidersHorizontal, Sun, Trash2, X, Zap,
 } from 'lucide-react'
 import { api } from './api'
 import type { Agent, EventItem, MMWNode, Policy, PortRule, SourceCount, Status as SystemStatus, UpdateInfo } from './api'
 
 type Tab = 'overview' | 'agents' | 'events' | 'updates'
-type DetailTab = 'overview' | 'protection' | 'services' | 'events'
+type DetailTab = 'overview' | 'protection' | 'services' | 'security' | 'events'
 type RouteState = { tab: Tab; agentID: string; detailTab: DetailTab }
 type Summary = { agents_total: number; agents_online: number; sockets: number; established: number; time_wait: number; conntrack: number; dropped: number; protected: number }
 type EditablePortRule = PortRule & { manual: boolean; source_rules: string[] }
@@ -32,6 +32,7 @@ function App() {
   const [deleteAgent, setDeleteAgent] = useState<Agent | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
   const [logoutOpen, setLogoutOpen] = useState(false)
+	const [passwordOpen, setPasswordOpen] = useState(false)
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('mmwx-guard-theme') || 'pixel')
 
@@ -112,7 +113,7 @@ function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
-      <Header tab={tab} setTab={next => navigate({ tab: next, agentID: '', detailTab: 'overview' })} theme={theme} setTheme={setTheme} admin={status.admin} version={status.version} updateAvailable={updateAvailable} onLogout={() => setLogoutOpen(true)} />
+      <Header tab={tab} setTab={next => navigate({ tab: next, agentID: '', detailTab: 'overview' })} theme={theme} setTheme={setTheme} admin={status.admin} version={status.version} updateAvailable={updateAvailable} onPassword={() => setPasswordOpen(true)} onLogout={() => setLogoutOpen(true)} />
       <main className="content" id="main-content">
         {error && <div className="alert-strip"><AlertTriangle size={18} />{error}<button onClick={() => setError('')} aria-label="关闭"><X size={16} /></button></div>}
         {selectedAgent ? <ServerDetail agent={selectedAgent} tab={detailTab} setTab={next => navigate({ tab: 'agents', agentID: selectedAgent.id, detailTab: next })} events={events.filter(event => event.agent_id === selectedAgent.id)} onBack={() => navigate({ tab: 'agents', agentID: '', detailTab: 'overview' })} onRename={() => setRenameAgent(selectedAgent)} onSaved={() => void refresh()} /> : <>
@@ -131,12 +132,13 @@ function App() {
         catch (err) { setError((err as Error).message) }
         finally { setDeleteBusy(false) }
       }} />}
-      {logoutOpen && <ConfirmDialog title="退出登录" description="确定退出当前管理员会话吗？" confirmLabel="退出登录" onClose={() => setLogoutOpen(false)} onConfirm={async () => { await logout(); setLogoutOpen(false) }} />}
+	      {logoutOpen && <ConfirmDialog title="退出登录" description="确定退出当前管理员会话吗？" confirmLabel="退出登录" returnFocus=".admin-menu" onClose={() => setLogoutOpen(false)} onConfirm={async () => { await logout(); setLogoutOpen(false) }} />}
+		{passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}
     </div>
   )
 }
 
-function Header({ tab, setTab, theme, setTheme, admin, version, updateAvailable, onLogout }: { tab: Tab; setTab: (tab: Tab) => void; theme: string; setTheme: (theme: string) => void; admin: string; version: string; updateAvailable: boolean; onLogout: () => void }) {
+function Header({ tab, setTab, theme, setTheme, admin, version, updateAvailable, onPassword, onLogout }: { tab: Tab; setTab: (tab: Tab) => void; theme: string; setTheme: (theme: string) => void; admin: string; version: string; updateAvailable: boolean; onPassword: () => void; onLogout: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const items: { id: Tab; label: string; icon: typeof Activity }[] = [
     { id: 'overview', label: '安全概览', icon: Activity },
@@ -164,7 +166,8 @@ function Header({ tab, setTab, theme, setTheme, admin, version, updateAvailable,
             <div className="user-summary"><img className="avatar large" src="/images/admin-avatar.webp" alt="" /><strong>{admin}</strong><small>管理员 · {version}</small></div>
             <button role="menuitem" onClick={() => { setTab('updates'); setMenuOpen(false) }}><PackageCheck size={17} /><span>版本更新{updateAvailable && <i className="update-dot" aria-label="有新版本" />}</span><small>{version}</small></button>
             <button role="menuitem" onClick={() => { setTheme(theme === 'pixel' ? 'gold' : 'pixel'); setMenuOpen(false) }}><Settings2 size={17} /><span>界面风格</span><small>{theme === 'pixel' ? '妙妙屋' : '金色'}</small></button>
-            <button role="menuitem" className="logout-item" onClick={onLogout}><LogOut size={17} /><span>退出登录</span></button>
+				<button role="menuitem" onClick={event => { (event.currentTarget.closest('.user-menu')?.querySelector('.admin-menu') as HTMLButtonElement | null)?.focus(); setMenuOpen(false); onPassword() }}><KeyRound size={17} /><span>修改密码</span><small>退出其他会话</small></button>
+			<button role="menuitem" className="logout-item" onClick={event => { (event.currentTarget.closest('.user-menu')?.querySelector('.admin-menu') as HTMLButtonElement | null)?.focus(); setMenuOpen(false); onLogout() }}><LogOut size={17} /><span>退出登录</span></button>
           </div>}
         </div>
       </div>
@@ -209,7 +212,7 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
     <section className="panel fleet-panel">
       <PanelHeader icon={<Cpu size={21} />} title="服务器状态" subtitle="实时负载、内存和连接压力" />
       <div className="table-wrap"><table><thead><tr><th>服务器</th><th>状态</th><th>IP 地址</th><th>负载</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>拦截</th><th>策略</th></tr></thead><tbody>
-        {agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>{agent.os} / {agent.arch}</small></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry ? agent.telemetry.load_1.toFixed(2) : '-'}</td><td>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td className="danger-text">{formatNumber(agent.telemetry?.dropped_total || 0)}</td><td>{agent.policy_name || '未下发'}</td></tr>)}
+		{agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>{agent.os} / {agent.arch}</small></td><td><AgentStatus agent={agent} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry ? agent.telemetry.load_1.toFixed(2) : '-'}</td><td>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td className="danger-text">{formatNumber(agent.telemetry?.dropped_total || 0)}</td><td>{agent.policy_name || '未下发'}</td></tr>)}
         {agents.length === 0 && <tr><td colSpan={9}><Empty text="还没有服务器，前往服务器管理添加第一台" /></td></tr>}
       </tbody></table></div>
     </section>
@@ -225,7 +228,7 @@ function Agents({ agents, onEnroll, onOpen, onRename, onDelete }: { agents: Agen
     return agents.filter(agent => {
       const matchesQuery = !needle || [agent.name, agent.ip_address, agent.os, agent.version].some(value => value?.toLowerCase().includes(needle))
       const protectedAgent = Boolean(agent.telemetry?.protected || agent.policy_name)
-      const matchesFilter = filter === 'all' || filter === agent.status || (filter === 'protected' && protectedAgent) || (filter === 'unprotected' && !protectedAgent)
+			const matchesFilter = filter === 'all' || filter === agent.status || (filter === 'protected' && protectedAgent) || (filter === 'unprotected' && !protectedAgent) || (filter === 'attention' && agentNeedsAttention(agent)) || (filter === 'revoked' && agent.credential_state === 'revoked')
       return matchesQuery && matchesFilter
     }).sort((left, right) => {
       if (sort === 'connections') return (right.telemetry?.sockets.established || 0) - (left.telemetry?.sockets.established || 0)
@@ -235,9 +238,9 @@ function Agents({ agents, onEnroll, onOpen, onRename, onDelete }: { agents: Agen
   }, [agents, filter, query, sort])
   return <section className="panel management-panel">
     <div className="section-toolbar"><div><h2>服务器列表 ({visibleAgents.length} / {agents.length})</h2><p>进入服务器详情后独立设置防护、端口与可信入口</p></div><button className="primary-button" onClick={onEnroll}><Plus size={18} />添加服务器</button></div>
-    <div className="list-controls" role="search"><label className="search-field"><Search size={17} /><span className="sr-only">搜索服务器</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、IP、系统或版本" /></label><label><SlidersHorizontal size={17} /><span className="sr-only">筛选状态</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部状态</option><option value="online">在线</option><option value="offline">离线</option><option value="protected">已配置防护</option><option value="unprotected">未配置防护</option></select></label><label><span className="sr-only">排序方式</span><select value={sort} onChange={event => setSort(event.target.value)}><option value="name">按名称排序</option><option value="connections">按连接数排序</option><option value="cpu">按 CPU 排序</option></select></label></div>
+		<div className="list-controls" role="search"><label className="search-field"><Search size={17} /><span className="sr-only">搜索服务器</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、IP、系统或版本" /></label><label><SlidersHorizontal size={17} /><span className="sr-only">筛选状态</span><select value={filter} onChange={event => setFilter(event.target.value)}><option value="all">全部状态</option><option value="attention">需要处理</option><option value="online">在线</option><option value="offline">离线</option><option value="revoked">凭据已撤销</option><option value="protected">已配置防护</option><option value="unprotected">未配置防护</option></select></label><label><span className="sr-only">排序方式</span><select value={sort} onChange={event => setSort(event.target.value)}><option value="name">按名称排序</option><option value="connections">按连接数排序</option><option value="cpu">按 CPU 排序</option></select></label></div>
     <div className="table-wrap"><table className="agent-table"><thead><tr><th>名称</th><th>连接状态</th><th>公网 IP</th><th>CPU</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>SYN 堆积</th><th>Conntrack</th><th>防护</th><th>操作</th></tr></thead><tbody>
-      {visibleAgents.map(agent => <tr key={agent.id}><td><button className="server-link" onClick={() => onOpen(agent)}><span><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></span><ChevronRight size={17} /></button><IntegrationBadges agent={agent} /></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name ? <span className="protection-label"><ShieldCheck size={14} />{agent.policy_name}</span> : <span className="muted">未配置</span>}</td><td><div className="row-actions"><button title="防护设置" aria-label={`打开 ${agent.name} 防护设置`} onClick={() => onOpen(agent)}><ShieldCheck size={18} /></button><button title="修改名称" aria-label={`修改 ${agent.name} 名称`} onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" aria-label={`删除 ${agent.name}`} className="danger" onClick={() => onDelete(agent)}><Trash2 size={18} /></button></div></td></tr>)}
+		{visibleAgents.map(agent => <tr key={agent.id}><td><button className="server-link" onClick={() => onOpen(agent)}><span><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></span><ChevronRight size={17} /></button><IntegrationBadges agent={agent} /></td><td><AgentStatus agent={agent} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name ? <span className="protection-label"><ShieldCheck size={14} />{agent.policy_name}</span> : <span className="muted">未配置</span>}</td><td><div className="row-actions"><button title="防护设置" aria-label={`打开 ${agent.name} 防护设置`} onClick={() => onOpen(agent)}><ShieldCheck size={18} /></button><button title="修改名称" aria-label={`修改 ${agent.name} 名称`} onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" aria-label={`删除 ${agent.name}`} className="danger" onClick={() => onDelete(agent)}><Trash2 size={18} /></button></div></td></tr>)}
       {visibleAgents.length === 0 && <tr><td colSpan={11}><Empty text={agents.length === 0 ? '点击“添加服务器”生成一次性安装命令' : '没有符合筛选条件的服务器'} /></td></tr>}
     </tbody></table></div>
   </section>
@@ -255,25 +258,75 @@ function ServerDetail({ agent, tab, setTab, events, onBack, onRename, onSaved }:
     void api<{ policy: Policy | null }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/protection`).then(result => { if (active) setPolicy(result.policy) }).catch(error => { if (active) setPolicyError((error as Error).message) }).finally(() => { if (active) setPolicyLoading(false) })
     return () => { active = false }
   }, [agent.id])
-  const items: { id: DetailTab; label: string; icon: typeof Activity }[] = [
-    { id: 'overview', label: '运行概览', icon: Activity },
-    { id: 'protection', label: '防护设置', icon: ShieldCheck },
-    { id: 'services', label: '服务与端口', icon: Radio },
-    { id: 'events', label: '安全事件', icon: FileClock },
+	const items: { id: DetailTab; label: string; icon: typeof Activity }[] = [
+		{ id: 'overview', label: '运行概览', icon: Activity },
+		{ id: 'protection', label: '防护设置', icon: ShieldCheck },
+		{ id: 'services', label: '服务与端口', icon: Radio },
+		{ id: 'security', label: '连接安全', icon: LockKeyhole },
+		{ id: 'events', label: '安全事件', icon: FileClock },
   ]
   const canLeaveProtection = () => !policyDirty || window.confirm('防护设置还有未保存的修改，确定离开吗？')
   return <div className="server-detail">
     <button className="back-button" onClick={() => { if (canLeaveProtection()) onBack() }}><ArrowLeft size={17} />服务器管理</button>
     <header className="server-heading">
-      <div><div className="server-title"><h1>{agent.name}</h1><Status status={agent.status} protected={agent.telemetry?.protected} /><button className="plain-icon" onClick={onRename} title="修改名称" aria-label="修改服务器名称"><Pencil size={17} /></button></div><p><span className="mono">{agent.ip_address || '-'}</span><i />{agent.os} / {agent.arch}<i />Agent {agent.version || '-'}</p></div>
+		<div><div className="server-title"><h1>{agent.name}</h1><AgentStatus agent={agent} /><button className="plain-icon" onClick={onRename} title="修改名称" aria-label="修改服务器名称"><Pencil size={17} /></button></div><p><span className="mono">{agent.ip_address || '-'}</span><i />{agent.os} / {agent.arch}<i />Agent {agent.version || '-'}</p></div>
       <div className="server-heading-stats"><span><small>当前策略</small><strong>{agent.policy_name || '未配置'}</strong></span><span><small>最后上报</small><strong>{agent.last_seen ? relativeTime(agent.last_seen) : '-'}</strong></span></div>
     </header>
     <nav className="detail-tabs" aria-label="服务器详情导航">{items.map(item => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => { if (item.id === tab || canLeaveProtection()) setTab(item.id) }}><item.icon size={17} />{item.label}{item.id === 'protection' && policyDirty && <i className="dirty-dot" aria-label="有未保存修改" />}</button>)}</nav>
     {tab === 'overview' && <ServerOverview agent={agent} policy={policy} />}
     {tab === 'protection' && (policyLoading ? <div className="panel loading-panel"><RefreshCw className="spin" size={22} />正在读取服务器防护设置...</div> : policyError ? <div className="alert-strip"><AlertTriangle size={18} />{policyError}</div> : <ProtectionEditor agent={agent} initialPolicy={policy} onDirtyChange={setPolicyDirty} onSaved={saved => { setPolicy(saved); onSaved() }} />)}
-    {tab === 'services' && <ServicePorts agent={agent} />}
-    {tab === 'events' && <Events events={events} agents={[agent]} />}
+	{tab === 'services' && <ServicePorts agent={agent} />}
+	{tab === 'security' && <AgentSecurity agent={agent} onChanged={onSaved} />}
+	{tab === 'events' && <Events events={events} agents={[agent]} />}
   </div>
+}
+
+function AgentSecurity({ agent, onChanged }: { agent: Agent; onChanged: () => void }) {
+	const [rotateOpen, setRotateOpen] = useState(false)
+	const [revokeOpen, setRevokeOpen] = useState(false)
+	const [busy, setBusy] = useState(false)
+	const [error, setError] = useState('')
+	const [message, setMessage] = useState('')
+	const [pairing, setPairing] = useState<{ install_command: string; expires_in_minutes: number } | null>(null)
+	const [copied, setCopied] = useState(false)
+	const rotate = async () => {
+		setBusy(true); setError(''); setMessage('')
+		try {
+			const result = await api<{ message: string }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/credentials/rotate`, { method: 'POST', body: '{}' })
+			setMessage(result.message); setRotateOpen(false); window.setTimeout(onChanged, 1800)
+		} catch (err) { setError((err as Error).message); setRotateOpen(false) }
+		finally { setBusy(false) }
+	}
+	const revoke = async () => {
+		setBusy(true); setError(''); setMessage('')
+		try {
+			await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/credentials/revoke`, { method: 'POST', body: '{}' })
+			setMessage('Agent 凭据已撤销'); setRevokeOpen(false); onChanged()
+		} catch (err) { setError((err as Error).message); setRevokeOpen(false) }
+		finally { setBusy(false) }
+	}
+	const createPairing = async () => {
+		setBusy(true); setError(''); setMessage(''); setPairing(null)
+		try { setPairing(await api(`/api/admin/agents/${encodeURIComponent(agent.id)}/pairing`, { method: 'POST', body: JSON.stringify({ ttl_minutes: 15 }) })) }
+		catch (err) { setError((err as Error).message) }
+		finally { setBusy(false) }
+	}
+	const copyPairing = async () => {
+		if (!pairing) return
+		await navigator.clipboard.writeText(pairing.install_command); setCopied(true); window.setTimeout(() => setCopied(false), 1500)
+	}
+	return <div className="security-page">
+		{error && <div className="alert-strip"><AlertTriangle size={18} />{error}<button onClick={() => setError('')} aria-label="关闭"><X size={16} /></button></div>}
+		{message && <div className="success-strip"><Check size={18} />{message}</div>}
+		<section className="detail-grid security-grid">
+			<article className="panel detail-panel security-panel"><PanelHeader icon={<LockKeyhole size={21} />} title="主控信任" subtitle="Agent 固定并验证主控身份" /><dl className="detail-list"><div><dt>身份签名</dt><dd><SecurityState ok={Boolean(agent.controller_verified_at)} okText="已验证" waitingText="等待 Agent 验证" /></dd></div><div><dt>端到端通道</dt><dd><SecurityState ok={agent.secure_channel} okText="X25519 + AES-GCM" waitingText="TLS 兼容模式" /></dd></div><div><dt>主控指纹</dt><dd className="mono fingerprint">{shortFingerprint(agent.controller_key_fingerprint)}</dd></div><div><dt>验证时间</dt><dd>{formatTime(agent.controller_verified_at || '')}</dd></div></dl></article>
+			<article className="panel detail-panel security-panel"><PanelHeader icon={<KeyRound size={21} />} title="Agent 凭据" subtitle="独立凭据与机器标识绑定" /><dl className="detail-list"><div><dt>凭据状态</dt><dd><CredentialState state={agent.credential_state} /></dd></div><div><dt>最近认证</dt><dd>{formatTime(agent.last_authenticated_at || '')}</dd></div><div><dt>最近轮换</dt><dd>{formatTime(agent.credential_rotated_at || '')}</dd></div><div><dt>连接来源</dt><dd className="mono">{agent.ip_address || '-'}</dd></div></dl></article>
+		</section>
+		<section className="settings-section security-actions"><div className="settings-heading"><div><h2>凭据操作</h2><p>轮换保留现有策略；撤销后必须重新配对</p></div></div><div className="security-action-list"><div><span><strong>轮换凭据</strong><small>在线 Agent 通过加密通道自动换钥</small></span><button className="secondary-button" disabled={busy || agent.status !== 'online' || !agent.secure_channel || agent.credential_state === 'revoked'} onClick={() => setRotateOpen(true)}><RotateCw size={17} />立即轮换</button></div><div><span><strong>重新配对</strong><small>生成绑定当前机器的一次性安装命令</small></span><button className="secondary-button" disabled={busy} onClick={() => void createPairing()}><Link2 size={17} />生成命令</button></div><div><span><strong>撤销访问</strong><small>立即断开 Agent 并拒绝旧凭据</small></span><button className="danger-button" disabled={busy || agent.credential_state === 'revoked'} onClick={() => setRevokeOpen(true)}><Link2Off size={17} />撤销凭据</button></div></div></section>
+		{pairing && <section className="settings-section pairing-result"><div className="settings-heading"><div><h2>一次性重新配对命令</h2><p>{pairing.expires_in_minutes} 分钟内有效，仅接受原机器标识</p></div><button className="primary-button" onClick={() => void copyPairing()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? '已复制' : '复制命令'}</button></div><pre>{pairing.install_command}</pre></section>}
+		{rotateOpen && <ConfirmDialog title="轮换 Agent 凭据" description="新凭据会经端到端加密通道下发，Agent 随后自动重连，现有防护规则不会中断。" confirmLabel="确认轮换" busy={busy} onClose={() => setRotateOpen(false)} onConfirm={rotate} />}
+		{revokeOpen && <ConfirmDialog title="撤销 Agent 凭据" description="当前连接会立即断开。恢复连接需要在原服务器执行一次性重新配对命令。" confirmLabel="撤销凭据" busy={busy} danger onClose={() => setRevokeOpen(false)} onConfirm={revoke} />}
+	</div>
 }
 
 function ServerOverview({ agent, policy }: { agent: Agent; policy: Policy | null }) {
@@ -487,6 +540,27 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
   </Modal>
 }
 
+function PasswordDialog({ onClose }: { onClose: () => void }) {
+	const [currentPassword, setCurrentPassword] = useState('')
+	const [newPassword, setNewPassword] = useState('')
+	const [confirmPassword, setConfirmPassword] = useState('')
+	const [busy, setBusy] = useState(false)
+	const [error, setError] = useState('')
+	const submit = async (event: FormEvent) => {
+		event.preventDefault(); setError('')
+		if (newPassword !== confirmPassword) { setError('两次输入的新密码不一致'); return }
+		setBusy(true)
+		try {
+			await api('/api/admin/account/password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) })
+			onClose()
+		} catch (err) { setError((err as Error).message) }
+		finally { setBusy(false) }
+	}
+	return <Modal title="修改管理员密码" subtitle="保存后其他登录会话立即失效" returnFocus=".admin-menu" onClose={busy ? () => undefined : onClose}>
+		<form className="form-grid" onSubmit={submit}>{error && <div className="form-error full" role="alert">{error}</div>}<label className="full"><span>当前密码</span><input autoFocus type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} required /></label><label className="full"><span>新密码</span><input type="password" autoComplete="new-password" minLength={10} maxLength={72} value={newPassword} onChange={event => setNewPassword(event.target.value)} required /></label><label className="full"><span>确认新密码</span><input type="password" autoComplete="new-password" minLength={10} maxLength={72} value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} required /></label><div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" disabled={busy || newPassword.length < 10}>{busy ? '正在保存...' : '修改密码'}</button></div></form>
+	</Modal>
+}
+
 function RenameAgentDialog({ agent, onClose, onSaved }: { agent: Agent; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(agent.name)
   const [error, setError] = useState('')
@@ -652,17 +726,34 @@ function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (toke
   return <div className="turnstile-slot" ref={setContainer} aria-label="Cloudflare 人机验证" />
 }
 
-function Modal({ title, subtitle, onClose, children, wide = false }: { title: string; subtitle: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [onClose])
-  return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}><section className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭"><X size={20} /></button></header><div className="modal-body">{children}</div></section></div>
+function Modal({ title, subtitle, onClose, children, wide = false, returnFocus }: { title: string; subtitle: string; onClose: () => void; children: ReactNode; wide?: boolean; returnFocus?: string }) {
+	const dialogRef = useRef<HTMLElement>(null)
+	const onCloseRef = useRef(onClose)
+	onCloseRef.current = onClose
+	useEffect(() => {
+		const previous = document.activeElement as HTMLElement | null
+		const dialog = dialogRef.current
+		const focusable = () => [...(dialog?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]') || [])]
+		const initial = dialog?.querySelector<HTMLElement>('[data-initial-focus]') || dialog?.querySelector<HTMLElement>('.modal-body input:not(:disabled), .modal-body select:not(:disabled), .modal-body textarea:not(:disabled)')
+		const focusTimer = window.setTimeout(() => (initial || focusable()[0] || dialog)?.focus(), 0)
+		const handleKey = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') { onCloseRef.current(); return }
+			if (event.key !== 'Tab') return
+			const items = focusable()
+			if (items.length === 0) { event.preventDefault(); return }
+			const first = items[0]
+			const last = items[items.length - 1]
+			if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+			else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+		}
+		window.addEventListener('keydown', handleKey)
+		return () => { window.clearTimeout(focusTimer); window.removeEventListener('keydown', handleKey); (returnFocus ? document.querySelector<HTMLElement>(returnFocus) : previous)?.focus() }
+	}, [])
+	return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}><section ref={dialogRef} tabIndex={-1} className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭"><X size={20} /></button></header><div className="modal-body">{children}</div></section></div>
 }
 
-function ConfirmDialog({ title, description, confirmLabel, busy = false, danger = false, onClose, onConfirm }: { title: string; description: string; confirmLabel: string; busy?: boolean; danger?: boolean; onClose: () => void; onConfirm: () => void | Promise<void> }) {
-  return <Modal title={title} subtitle="请确认本次操作" onClose={busy ? () => undefined : onClose}><div className="confirm-dialog"><AlertTriangle size={24} /><p>{description}</p><div className="dialog-actions"><button className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button className={danger ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => void onConfirm()}>{busy ? '正在处理...' : confirmLabel}</button></div></div></Modal>
+function ConfirmDialog({ title, description, confirmLabel, busy = false, danger = false, returnFocus, onClose, onConfirm }: { title: string; description: string; confirmLabel: string; busy?: boolean; danger?: boolean; returnFocus?: string; onClose: () => void; onConfirm: () => void | Promise<void> }) {
+		  return <Modal title={title} subtitle="请确认本次操作" returnFocus={returnFocus} onClose={busy ? () => undefined : onClose}><div className="confirm-dialog"><AlertTriangle size={24} /><p>{description}</p><div className="dialog-actions"><button data-initial-focus className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button className={danger ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => void onConfirm()}>{busy ? '正在处理...' : confirmLabel}</button></div></div></Modal>
 }
 
 function Metric({ icon, title, value, detail, tone }: { icon: ReactNode; title: string; value: string; detail: string; tone: string }) { return <article className={`metric ${tone}`}><div className="metric-head"><h2>{title}</h2><span>{icon}</span></div><p>{detail}</p><strong>{value}</strong></article> }
@@ -670,6 +761,13 @@ function PanelHeader({ icon, title, subtitle }: { icon: ReactNode; title: string
 function Empty({ text }: { text: string }) { return <div className="empty"><Clipboard size={26} /><span>{text}</span></div> }
 function NumberField({ label, value, onChange, disabled = false }: { label: string; value: number; onChange: (v: number) => void; disabled?: boolean }) { return <label><span>{label}</span><input type="number" min="1" value={value} onChange={e => onChange(Number(e.target.value))} disabled={disabled} required /></label> }
 function Status({ status, protected: active }: { status: string; protected?: boolean }) { return <span className={`status ${status}`}><i />{status === 'online' ? (active ? '防护中' : '在线') : '离线'}</span> }
+function AgentStatus({ agent }: { agent: Agent }) {
+	if (agent.credential_state === 'revoked') return <span className="status revoked"><i />已撤销</span>
+	if (agent.credential_state === 'rotation_pending') return <span className="status pending"><i />换钥中</span>
+	return <Status status={agent.status} protected={agent.telemetry?.protected} />
+}
+function SecurityState({ ok, okText, waitingText }: { ok: boolean; okText: string; waitingText: string }) { return <span className={`security-state ${ok ? 'ok' : 'waiting'}`}>{ok ? <ShieldCheck size={15} /> : <AlertTriangle size={15} />}{ok ? okText : waitingText}</span> }
+function CredentialState({ state }: { state: Agent['credential_state'] }) { const values = { active: ['active', '有效'], rotation_pending: ['pending', '等待新凭据上线'], revoked: ['revoked', '已撤销'] } as const; const value = values[state] || values.active; return <span className={`credential-state ${value[0]}`}>{value[1]}</span> }
 function IntegrationBadges({ agent }: { agent: Agent }) {
   const integrations = agent.telemetry?.integrations
   if (!integrations?.mmw && !integrations?.forwardx) return null
@@ -713,6 +811,14 @@ function defaultAgentPolicy(name: string, sources: DiscoveredPort[]): Policy {
 }
 function formatListen(listen: string | undefined, port: number) { return `${listen || '0.0.0.0'}:${port}` }
 
+function shortFingerprint(value?: string) { return value ? `${value.slice(0, 12)}...${value.slice(-12)}` : '-' }
+function agentNeedsAttention(agent: Agent) {
+	const telemetry = agent.telemetry
+	if (agent.status !== 'online' || agent.credential_state !== 'active' || !agent.secure_channel || !agent.controller_verified_at) return true
+	if (!telemetry) return true
+	return (telemetry.cpu_usage || 0) >= 90 || (telemetry.memory_total > 0 && telemetry.memory_used / telemetry.memory_total >= .9) || (telemetry.conntrack_max > 0 && telemetry.conntrack / telemetry.conntrack_max >= .8) || telemetry.sockets.syn_recv >= 1000
+}
+
 function validatePolicy(policy: Policy) {
   if (!policy.name.trim()) return '请输入策略名称'
   const ports = new Set<number>()
@@ -731,11 +837,14 @@ function validatePolicy(policy: Policy) {
 }
 
 function eventKindLabel(kind: string) {
-  const labels: Record<string, string> = {
-    system_setup: '系统初始化', login_succeeded: '登录成功', login_failed: '登录失败', login_limited: '登录限速',
-    enrollment_created: '注册令牌', agent_enrolled: 'Agent 注册', agent_online: 'Agent 上线', agent_deleted: 'Agent 删除', agent_renamed: '名称修改',
-    agent_identity_mismatch: '身份异常', policy_saved: '策略保存', policy_deploy: '策略下发', agent_update: 'Agent 更新', controller_update_queued: '主控更新',
-  }
+	  const labels: Record<string, string> = {
+	    system_setup: '系统初始化', login_succeeded: '登录成功', login_failed: '登录失败', login_limited: '登录限速',
+	    enrollment_created: '注册令牌', agent_enrolled: 'Agent 注册', agent_online: 'Agent 上线', agent_deleted: 'Agent 删除', agent_renamed: '名称修改',
+	    agent_identity_mismatch: 'Agent 身份异常', controller_identity_mismatch: '主控身份异常', agent_credential_rotation_pending: '轮换待确认', agent_credential_rotation_failed: '轮换失败',
+	    agent_credential_rotation_started: '轮换已下发', agent_credential_rotated: '凭据已轮换', agent_credential_revoked: '凭据已撤销',
+	    agent_pairing_created: '重新配对令牌', agent_repaired: '重新配对完成', password_change_failed: '改密失败', password_changed: '密码已修改',
+	    policy_saved: '策略保存', policy_deploy: '策略下发', agent_update: 'Agent 更新', controller_update_queued: '主控更新',
+	  }
   return labels[kind] || kind
 }
 
@@ -744,7 +853,7 @@ function readRoute(): RouteState {
   const rawTab = params.get('view')
   const rawDetail = params.get('section')
   const tabs: Tab[] = ['overview', 'agents', 'events', 'updates']
-  const detailTabs: DetailTab[] = ['overview', 'protection', 'services', 'events']
+	const detailTabs: DetailTab[] = ['overview', 'protection', 'services', 'security', 'events']
   const agentID = params.get('server') || ''
   return {
     tab: tabs.includes(rawTab as Tab) ? rawTab as Tab : agentID ? 'agents' : 'overview',

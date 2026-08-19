@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,20 +12,23 @@ import (
 )
 
 const (
-	MaxMessageBytes          = 256 << 10
+	MaxMessageBytes          = 320 << 10
 	MaxTelemetryPayloadBytes = 192 << 10
 	MaxResultPayloadBytes    = 8 << 10
 
-	TypeHello        = "hello"
-	TypeHelloAck     = "hello_ack"
-	TypeTelemetry    = "telemetry"
-	TypeApplyPolicy  = "apply_policy"
-	TypeApplyResult  = "apply_result"
-	TypeUpdateAgent  = "update_agent"
-	TypeUpdateResult = "update_result"
-	TypeRollback     = "rollback_policy"
-	TypePing         = "ping"
-	TypePong         = "pong"
+	TypeHello              = "hello"
+	TypeHelloAck           = "hello_ack"
+	TypeTelemetry          = "telemetry"
+	TypeApplyPolicy        = "apply_policy"
+	TypeApplyResult        = "apply_result"
+	TypeUpdateAgent        = "update_agent"
+	TypeUpdateResult       = "update_result"
+	TypeRotateCredential   = "rotate_credential"
+	TypeRotateResult       = "rotate_result"
+	TypeControllerVerified = "controller_verified"
+	TypeRollback           = "rollback_policy"
+	TypePing               = "ping"
+	TypePong               = "pong"
 )
 
 type Message struct {
@@ -73,6 +77,21 @@ func ValidateHello(hello Hello) error {
 	if strings.TrimSpace(hello.MachineID) == "" || len(hello.MachineID) > 256 || len(hello.Name) > 256 || len(hello.OS) > 64 || len(hello.Arch) > 64 || len(hello.Version) > 128 {
 		return errors.New("hello metadata is invalid")
 	}
+	secureFields := hello.Challenge != "" || hello.AgentEphemeralPublicKey != "" || hello.ControllerKeyFingerprint != ""
+	if secureFields {
+		if _, err := DecodeKey(hello.Challenge, 32); err != nil {
+			return errors.New("hello challenge is invalid")
+		}
+		if _, err := DecodeKey(hello.AgentEphemeralPublicKey, 32); err != nil {
+			return errors.New("hello ephemeral key is invalid")
+		}
+		if hello.ControllerKeyFingerprint != "" {
+			fingerprint, err := hex.DecodeString(hello.ControllerKeyFingerprint)
+			if err != nil || len(fingerprint) != 32 {
+				return errors.New("hello controller fingerprint is invalid")
+			}
+		}
+	}
 	return nil
 }
 
@@ -87,11 +106,22 @@ func ValidateResult(message Message, result ApplyResult) error {
 }
 
 type Hello struct {
-	Name      string `json:"name"`
-	MachineID string `json:"machine_id"`
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
-	Version   string `json:"version"`
+	Name                     string `json:"name"`
+	MachineID                string `json:"machine_id"`
+	OS                       string `json:"os"`
+	Arch                     string `json:"arch"`
+	Version                  string `json:"version"`
+	Challenge                string `json:"challenge,omitempty"`
+	AgentEphemeralPublicKey  string `json:"agent_ephemeral_public_key,omitempty"`
+	ControllerKeyFingerprint string `json:"controller_key_fingerprint,omitempty"`
+}
+
+type HelloAck struct {
+	Version                      string `json:"version"`
+	Secure                       bool   `json:"secure"`
+	ControllerPublicKey          string `json:"controller_public_key,omitempty"`
+	ControllerEphemeralPublicKey string `json:"controller_ephemeral_public_key,omitempty"`
+	Signature                    string `json:"signature,omitempty"`
 }
 
 type ApplyPolicy struct {
@@ -108,4 +138,12 @@ type AgentUpdate struct {
 	Version string `json:"version"`
 	SHA256  string `json:"sha256"`
 	Size    int64  `json:"size"`
+}
+
+type RotateCredential struct {
+	Secret string `json:"secret"`
+}
+
+type ControllerVerified struct {
+	Fingerprint string `json:"fingerprint"`
 }

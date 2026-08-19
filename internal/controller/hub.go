@@ -14,6 +14,7 @@ import (
 
 type agentConnection struct {
 	conn    *websocket.Conn
+	session *protocol.SecureSession
 	writeMu sync.Mutex
 }
 
@@ -27,13 +28,13 @@ func NewHub() *Hub {
 	return &Hub{agents: make(map[string]*agentConnection), pending: make(map[string]chan protocol.ApplyResult)}
 }
 
-func (h *Hub) Register(id string, conn *websocket.Conn) {
+func (h *Hub) Register(id string, conn *websocket.Conn, session *protocol.SecureSession) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if old := h.agents[id]; old != nil {
 		_ = old.conn.Close(websocket.StatusPolicyViolation, "replaced by a newer connection")
 	}
-	h.agents[id] = &agentConnection{conn: conn}
+	h.agents[id] = &agentConnection{conn: conn, session: session}
 }
 
 func (h *Hub) Unregister(id string, conn *websocket.Conn) {
@@ -48,6 +49,13 @@ func (h *Hub) Online(id string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.agents[id] != nil
+}
+
+func (h *Hub) Secure(id string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	agent := h.agents[id]
+	return agent != nil && agent.session != nil
 }
 
 func (h *Hub) Resolve(requestID string, result protocol.ApplyResult) {
@@ -68,6 +76,19 @@ func (h *Hub) ApplyPolicy(ctx context.Context, agentID string, policy model.Poli
 
 func (h *Hub) UpdateAgent(ctx context.Context, agentID string, update protocol.AgentUpdate) (protocol.ApplyResult, error) {
 	return h.request(ctx, agentID, protocol.TypeUpdateAgent, update)
+}
+
+func (h *Hub) RotateCredential(ctx context.Context, agentID, secret string) (protocol.ApplyResult, error) {
+	return h.request(ctx, agentID, protocol.TypeRotateCredential, protocol.RotateCredential{Secret: secret})
+}
+
+func (h *Hub) Disconnect(agentID, reason string) {
+	h.mu.RLock()
+	agent := h.agents[agentID]
+	h.mu.RUnlock()
+	if agent != nil {
+		_ = agent.conn.Close(websocket.StatusPolicyViolation, reason)
+	}
 }
 
 func (h *Hub) request(ctx context.Context, agentID, messageType string, payload any) (protocol.ApplyResult, error) {
@@ -95,7 +116,15 @@ func (h *Hub) request(ctx context.Context, agentID, messageType string, payload 
 	}()
 	agent.writeMu.Lock()
 	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	err = wsjson.Write(writeCtx, agent.conn, msg)
+	if agent.session != nil {
+		var envelope protocol.SecureEnvelope
+		envelope, err = agent.session.EncryptMessage(msg)
+		if err == nil {
+			err = wsjson.Write(writeCtx, agent.conn, envelope)
+		}
+	} else {
+		err = wsjson.Write(writeCtx, agent.conn, msg)
+	}
 	cancel()
 	agent.writeMu.Unlock()
 	if err != nil {

@@ -36,3 +36,13 @@ func TestValidateHelloBoundsMetadata(t *testing.T) {
 		t.Fatal("empty machine ID accepted")
 	}
 }
+
+func TestValidateHelloRejectsMalformedControllerFingerprint(t *testing.T) {
+	hello := Hello{
+		MachineID: "machine-1", Challenge: EncodeKey(make([]byte, 32)),
+		AgentEphemeralPublicKey: EncodeKey(make([]byte, 32)), ControllerKeyFingerprint: "zz" + string(make([]byte, 62)),
+	}
+	if err := ValidateHello(hello); err == nil {
+		t.Fatal("malformed controller fingerprint was accepted")
+	}
+}

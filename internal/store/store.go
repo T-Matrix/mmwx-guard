@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS enrollment_tokens (
     label TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     used_at TEXT,
+	agent_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS policies (
@@ -73,6 +74,14 @@ CREATE TABLE IF NOT EXISTS agents (
     name TEXT NOT NULL,
     machine_id TEXT NOT NULL UNIQUE,
     secret_hash TEXT NOT NULL,
+	pending_secret_hash TEXT NOT NULL DEFAULT '',
+	pending_secret_expires_at TEXT NOT NULL DEFAULT '',
+	credential_rotated_at TEXT NOT NULL DEFAULT '',
+	credential_revoked_at TEXT NOT NULL DEFAULT '',
+	last_authenticated_at TEXT NOT NULL DEFAULT '',
+	controller_key_fingerprint TEXT NOT NULL DEFAULT '',
+	controller_verified_at TEXT NOT NULL DEFAULT '',
+	secure_channel INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'offline',
     ip_address TEXT NOT NULL DEFAULT '',
     os TEXT NOT NULL DEFAULT '',
@@ -101,7 +110,56 @@ CREATE TABLE IF NOT EXISTS events (
 	    DELETE FROM events WHERE id < NEW.id - 10000;
 	END;
 	`
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	columns := []struct {
+		table, name, definition string
+	}{
+		{"enrollment_tokens", "agent_id", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "pending_secret_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "pending_secret_expires_at", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "credential_rotated_at", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "credential_revoked_at", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "last_authenticated_at", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "controller_key_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "controller_verified_at", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "secure_channel", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, column := range columns {
+		if err := s.ensureColumn(column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureColumn(table, name, definition string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if columnName == name {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + definition)
 	return err
 }
 
@@ -149,28 +207,58 @@ func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 	return err
 }
 
-func (s *Store) CreateEnrollment(ctx context.Context, tokenHash, label string, expires time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens(token_hash,label,expires_at,created_at) VALUES(?,?,?,?)`, tokenHash, label, expires.UTC().Format(time.RFC3339Nano), now())
+func (s *Store) ChangeAdminPassword(ctx context.Context, username, passwordHash, sessionHash string, expires time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var adminID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM admins WHERE username=?`, username).Scan(&adminID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash=? WHERE id=?`, passwordHash, adminID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE admin_id=?`, adminID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(token_hash,admin_id,expires_at,created_at) VALUES(?,?,?,?)`, sessionHash, adminID, expires.UTC().Format(time.RFC3339Nano), now()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CreateEnrollment(ctx context.Context, tokenHash, label, agentID string, expires time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens(token_hash,label,agent_id,expires_at,created_at) VALUES(?,?,?,?,?)`, tokenHash, label, agentID, expires.UTC().Format(time.RFC3339Nano), now())
 	return err
 }
 
-func (s *Store) ConsumeEnrollment(ctx context.Context, tokenHash string) (string, error) {
+type Enrollment struct {
+	Label   string
+	AgentID string
+}
+
+func (s *Store) ConsumeEnrollment(ctx context.Context, tokenHash string) (Enrollment, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return Enrollment{}, err
 	}
 	defer tx.Rollback()
-	var label string
-	if err := tx.QueryRowContext(ctx, `SELECT label FROM enrollment_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?`, tokenHash, now()).Scan(&label); err != nil {
+	var enrollment Enrollment
+	if err := tx.QueryRowContext(ctx, `SELECT label,agent_id FROM enrollment_tokens WHERE token_hash=? AND used_at IS NULL AND expires_at>?`, tokenHash, now()).Scan(&enrollment.Label, &enrollment.AgentID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNotFound
+			return Enrollment{}, ErrNotFound
 		}
-		return "", err
+		return Enrollment{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at=? WHERE token_hash=?`, now(), tokenHash); err != nil {
-		return "", err
+		return Enrollment{}, err
 	}
-	return label, tx.Commit()
+	return enrollment, tx.Commit()
 }
 
 type NewAgent struct {
@@ -192,17 +280,90 @@ func (s *Store) AgentSecretHash(ctx context.Context, id string) (string, error) 
 	return hash, err
 }
 
-func (s *Store) AgentCredentials(ctx context.Context, id string) (secretHash, machineID string, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT secret_hash,machine_id FROM agents WHERE id=?`, id).Scan(&secretHash, &machineID)
+func (s *Store) AgentName(ctx context.Context, id string) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT name FROM agents WHERE id=?`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return name, err
+}
+
+type AgentCredentials struct {
+	SecretHash           string
+	PendingSecretHash    string
+	PendingSecretExpires string
+	MachineID            string
+	RevokedAt            string
+}
+
+func (s *Store) AgentCredentials(ctx context.Context, id string) (credentials AgentCredentials, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT secret_hash,pending_secret_hash,pending_secret_expires_at,machine_id,credential_revoked_at FROM agents WHERE id=?`, id).Scan(
+		&credentials.SecretHash, &credentials.PendingSecretHash, &credentials.PendingSecretExpires, &credentials.MachineID, &credentials.RevokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
 	return
 }
 
-func (s *Store) SetAgentConnected(ctx context.Context, id, ip, osName, arch, version string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET status='online',ip_address=?,os=?,arch=?,version=?,last_seen=? WHERE id=?`, ip, osName, arch, version, now(), id)
+func (s *Store) SetAgentConnected(ctx context.Context, id, ip, osName, arch, version string, secure bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET status='online',ip_address=?,os=?,arch=?,version=?,last_seen=?,last_authenticated_at=?,secure_channel=?,controller_key_fingerprint='',controller_verified_at='' WHERE id=?`, ip, osName, arch, version, now(), now(), secure, id)
 	return err
+}
+
+func (s *Store) MarkControllerVerified(ctx context.Context, id, fingerprint string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET controller_key_fingerprint=?,controller_verified_at=? WHERE id=?`, fingerprint, now(), id)
+	return err
+}
+
+func (s *Store) BeginCredentialRotation(ctx context.Context, id, pendingHash string, expires time.Time) error {
+	currentTime := now()
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET pending_secret_hash=?,pending_secret_expires_at=? WHERE id=? AND credential_revoked_at='' AND (pending_secret_hash='' OR pending_secret_expires_at='' OR pending_secret_expires_at<=?)`, pendingHash, expires.UTC().Format(time.RFC3339Nano), id, currentTime)
+	if err != nil {
+		return err
+	}
+	if count, _ := res.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ClearCredentialRotation(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET pending_secret_hash='',pending_secret_expires_at='' WHERE id=?`, id)
+	return err
+}
+
+func (s *Store) PromoteCredential(ctx context.Context, id, pendingHash string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET secret_hash=pending_secret_hash,pending_secret_hash='',pending_secret_expires_at='',credential_rotated_at=?,credential_revoked_at='' WHERE id=? AND pending_secret_hash=? AND pending_secret_expires_at>?`, now(), id, pendingHash, now())
+	if err != nil {
+		return err
+	}
+	if count, _ := res.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RevokeAgentCredential(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET credential_revoked_at=?,pending_secret_hash='',pending_secret_expires_at='',status='offline',secure_channel=0 WHERE id=?`, now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := res.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) PrepareAgentReenrollment(ctx context.Context, id, machineID, pendingHash, osName, arch, version, ip string, expires time.Time) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET pending_secret_hash=?,pending_secret_expires_at=?,status='offline',secure_channel=0,os=?,arch=?,version=?,ip_address=?,last_seen=? WHERE id=? AND machine_id=?`, pendingHash, expires.UTC().Format(time.RFC3339Nano), osName, arch, version, ip, now(), id, machineID)
+	if err != nil {
+		return err
+	}
+	if count, _ := res.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) TouchAgent(ctx context.Context, id string) error {
@@ -211,7 +372,7 @@ func (s *Store) TouchAgent(ctx context.Context, id string) error {
 }
 
 func (s *Store) SetAgentOffline(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET status='offline' WHERE id=?`, id)
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET status='offline',secure_channel=0 WHERE id=?`, id)
 	return err
 }
 
@@ -225,7 +386,7 @@ func (s *Store) UpdateTelemetry(ctx context.Context, id string, telemetry model.
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]model.AgentSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.name,a.status,a.ip_address,a.os,a.arch,a.version,a.last_seen,COALESCE(a.policy_id,0),COALESCE(p.name,''),a.policy_revision,a.telemetry_json FROM agents a LEFT JOIN policies p ON p.id=a.policy_id ORDER BY a.name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.name,a.status,a.ip_address,a.os,a.arch,a.version,a.last_seen,COALESCE(a.policy_id,0),COALESCE(p.name,''),a.policy_revision,a.telemetry_json,a.pending_secret_hash,a.pending_secret_expires_at,a.credential_rotated_at,a.credential_revoked_at,a.last_authenticated_at,a.controller_key_fingerprint,a.controller_verified_at,a.secure_channel FROM agents a LEFT JOIN policies p ON p.id=a.policy_id ORDER BY a.name`)
 	if err != nil {
 		return nil, err
 	}
@@ -234,8 +395,15 @@ func (s *Store) ListAgents(ctx context.Context) ([]model.AgentSummary, error) {
 	for rows.Next() {
 		var a model.AgentSummary
 		var telemetry sql.NullString
-		if err := rows.Scan(&a.ID, &a.Name, &a.Status, &a.IPAddress, &a.OS, &a.Arch, &a.Version, &a.LastSeen, &a.PolicyID, &a.PolicyName, &a.PolicyRevision, &telemetry); err != nil {
+		var pendingHash, pendingExpires string
+		if err := rows.Scan(&a.ID, &a.Name, &a.Status, &a.IPAddress, &a.OS, &a.Arch, &a.Version, &a.LastSeen, &a.PolicyID, &a.PolicyName, &a.PolicyRevision, &telemetry, &pendingHash, &pendingExpires, &a.CredentialRotatedAt, &a.CredentialRevokedAt, &a.LastAuthenticatedAt, &a.ControllerKeyFingerprint, &a.ControllerVerifiedAt, &a.SecureChannel); err != nil {
 			return nil, err
+		}
+		a.CredentialState = "active"
+		if a.CredentialRevokedAt != "" {
+			a.CredentialState = "revoked"
+		} else if expires, parseErr := time.Parse(time.RFC3339Nano, pendingExpires); pendingHash != "" && parseErr == nil && expires.After(time.Now()) {
+			a.CredentialState = "rotation_pending"
 		}
 		if telemetry.Valid && telemetry.String != "" {
 			var value model.Telemetry

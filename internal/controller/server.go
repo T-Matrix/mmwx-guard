@@ -540,14 +540,29 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func clientIP(r *http.Request) string {
+	if value := validIP(r.Header.Get("CF-Connecting-IP")); value != "" {
+		return value
+	}
 	if value := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); value != "" {
-		return strings.TrimSpace(strings.Split(value, ",")[0])
+		for _, candidate := range strings.Split(value, ",") {
+			if value := validIP(candidate); value != "" {
+				return value
+			}
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
+	if err == nil && validIP(host) != "" {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func validIP(value string) string {
+	value = strings.TrimSpace(value)
+	if net.ParseIP(value) == nil {
+		return ""
+	}
+	return value
 }
 
 func requestLogger(next http.Handler) http.Handler {

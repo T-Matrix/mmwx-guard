@@ -245,8 +245,9 @@ function ServerOverview({ agent, policy }: { agent: Agent; policy: Policy | null
 
 function ProtectionEditor({ agent, initialPolicy, onSaved }: { agent: Agent; initialPolicy: Policy | null; onSaved: (policy: Policy) => void }) {
   const discovered = discoveredPorts(agent)
-  const [policy, setPolicy] = useState<Policy>(() => initialPolicy || defaultAgentPolicy(agent.name, discovered))
-  const [selectedSources, setSelectedSources] = useState<string[]>(() => discovered.filter(source => (initialPolicy?.ports || []).some(port => port.port === source.port)).map(source => source.key))
+  const startingPolicy = initialPolicy || defaultAgentPolicy(agent.name, discovered)
+  const [policy, setPolicy] = useState<Policy>(() => startingPolicy)
+  const [selectedSources, setSelectedSources] = useState<string[]>(() => discovered.filter(source => startingPolicy.ports.some(port => port.port === source.port)).map(source => source.key))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')

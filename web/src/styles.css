@@ -313,7 +313,7 @@ td > small { color: var(--muted); margin-top: 3px; }
 .port-settings { padding: 14px 18px 18px; display: grid; gap: 12px; }
 .port-settings .port-editor { grid-column: auto; }
 .settings-fields { padding: 16px 18px 18px; }
-.settings-actions { position: sticky; bottom: 12px; z-index: 5; min-height: 66px; padding: 10px 14px; display: flex; align-items: center; justify-content: flex-end; gap: 16px; border: 2px solid var(--line); background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: 5px 5px 0 var(--shadow); backdrop-filter: blur(8px); }
+.settings-actions { min-height: 66px; padding: 10px 14px; display: flex; align-items: center; justify-content: flex-end; gap: 16px; border: 2px solid var(--line); background: var(--surface); box-shadow: 5px 5px 0 var(--shadow); }
 .settings-actions > span { color: var(--muted); font-size: 12px; }
 .success-strip { padding: 11px 14px; display: flex; align-items: center; gap: 9px; border: 2px solid var(--green); background: color-mix(in srgb, var(--green) 10%, var(--surface)); color: var(--green); font-weight: 700; }
 .loading-panel { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); }

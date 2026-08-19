@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -27,6 +28,13 @@ func TestTelemetryValidate(t *testing.T) {
 		{"negative sockets", func(value *Telemetry) { value.Sockets.Total = -1 }},
 		{"state exceeds total", func(value *Telemetry) { value.Sockets.Established = 21 }},
 		{"invalid source", func(value *Telemetry) { value.TopSources[0].IP = "not-an-ip" }},
+		{"too many sources", func(value *Telemetry) {
+			value.Sockets.Total = MaxTopSources + 1
+			value.TopSources = make([]SourceCount, MaxTopSources+1)
+			for index := range value.TopSources {
+				value.TopSources[index] = SourceCount{IP: fmt.Sprintf("2001:db8::%x", index+1), Connections: 1}
+			}
+		}},
 		{"stale collection", func(value *Telemetry) { value.CollectedAt = now.Add(-6 * time.Minute).Format(time.RFC3339Nano) }},
 	}
 	for _, test := range tests {

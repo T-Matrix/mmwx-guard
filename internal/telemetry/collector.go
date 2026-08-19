@@ -48,8 +48,8 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 		t.PolicyRevision = policy.Revision
 	}
 	mergeOffenderDrops(ctx, &t.TopSources)
-	if len(t.TopSources) > 20 {
-		t.TopSources = t.TopSources[:20]
+	if len(t.TopSources) > model.MaxTopSources {
+		t.TopSources = t.TopSources[:model.MaxTopSources]
 	}
 	return t
 }

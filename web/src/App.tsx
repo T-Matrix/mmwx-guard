@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, CircleGauge, Clipboard, Copy,
-  Cable, Cpu, Download, ExternalLink, FileClock, Filter, KeyRound, Link2, Link2Off, ListFilter, LockKeyhole, LogOut, Moon,
+  Cable, Cpu, Download, ExternalLink, FileClock, Filter, KeyRound, Link2, Link2Off, ListFilter, LockKeyhole, LogOut, Maximize2, Moon,
   Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, RotateCw, Save, Search, Server, Settings2,
   ShieldCheck, ShieldX, SlidersHorizontal, Sun, Trash2, X, Zap,
 } from 'lucide-react'
@@ -186,6 +186,7 @@ function PageTitle({ tab, busy, onRefresh }: { tab: Tab; busy: boolean; onRefres
 }
 
 function Overview({ summary, agents, events }: { summary: Summary; agents: Agent[]; events: EventItem[] }) {
+  const [sourcesOpen, setSourcesOpen] = useState(false)
   const sources = useMemo(() => aggregateSources(agents), [agents])
   const maxSource = Math.max(1, ...sources.map(s => s.connections + (s.dropped || 0)))
   return <>
@@ -198,7 +199,7 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
     </section>
     <section className="overview-grid">
       <div className="panel source-panel">
-        <PanelHeader icon={<Zap size={21} />} title="高频来源" subtitle="按当前连接与最近拦截量排序" />
+        <PanelHeader icon={<Zap size={21} />} title="高频来源" subtitle={`按当前连接与最近拦截量排序 · ${sources.length} 个来源`} action={<button className="panel-tool-button" disabled={sources.length === 0} onClick={() => setSourcesOpen(true)} title="展开全部来源" aria-label="展开全部来源" aria-haspopup="dialog"><Maximize2 size={17} /></button>} />
         {sources.length === 0 ? <Empty text="Agent 上线后会显示来源 IP" /> : <div className="source-list">{sources.slice(0, 8).map((source, i) => {
           const total = source.connections + (source.dropped || 0)
           return <div className="source-row" key={source.ip}><span className="rank">{String(i + 1).padStart(2, '0')}</span><span className="source-ip">{source.ip}</span><span className="source-bar"><i style={{ width: `${Math.max(3, total / maxSource * 100)}%` }} /></span><span className="source-values"><strong>{formatNumber(source.connections)}</strong><small>{formatNumber(source.dropped || 0)} 丢弃</small></span></div>
@@ -216,7 +217,30 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
         {agents.length === 0 && <tr><td colSpan={9}><Empty text="还没有服务器，前往服务器管理添加第一台" /></td></tr>}
       </tbody></table></div>
     </section>
+    {sourcesOpen && <SourceDialog sources={sources} onClose={() => setSourcesOpen(false)} />}
   </>
+}
+
+function SourceDialog({ sources, onClose }: { sources: SourceCount[]; onClose: () => void }) {
+  const [query, setQuery] = useState('')
+  const [copied, setCopied] = useState(false)
+  const visibleSources = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    return needle ? sources.filter(source => source.ip.toLowerCase().includes(needle)) : sources
+  }, [query, sources])
+  const maxSource = Math.max(1, ...visibleSources.map(source => source.connections + (source.dropped || 0)))
+  const copyIPs = async () => {
+    await navigator.clipboard.writeText(visibleSources.map(source => source.ip).join('\n'))
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1500)
+  }
+  return <Modal wide title="全部连接来源" subtitle={`当前上报 ${sources.length} 个来源`} onClose={onClose}>
+    <div className="source-dialog-toolbar"><label className="search-field"><Search size={17} /><span className="sr-only">搜索来源 IP</span><input autoFocus value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 IP 地址" /></label><span>{visibleSources.length} 个结果</span><button className="secondary-button" disabled={visibleSources.length === 0} onClick={() => void copyIPs()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? '已复制' : '复制 IP'}</button></div>
+    <div className="table-wrap source-dialog-table"><table><thead><tr><th>排名</th><th>来源 IP</th><th>连接分布</th><th>当前连接</th><th>累计拦截</th></tr></thead><tbody>{visibleSources.map((source, index) => {
+      const total = source.connections + (source.dropped || 0)
+      return <tr key={source.ip}><td className="rank">{String(index + 1).padStart(2, '0')}</td><td className="mono">{source.ip}</td><td><span className="source-bar"><i style={{ width: `${Math.max(3, total / maxSource * 100)}%` }} /></span></td><td><strong>{formatNumber(source.connections)}</strong></td><td className="danger-text">{formatNumber(source.dropped || 0)}</td></tr>
+    })}{visibleSources.length === 0 && <tr><td colSpan={5}><Empty text="没有匹配的来源 IP" /></td></tr>}</tbody></table></div>
+  </Modal>
 }
 
 function Agents({ agents, onEnroll, onOpen, onRename, onDelete }: { agents: Agent[]; onEnroll: () => void; onOpen: (agent: Agent) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void }) {
@@ -364,6 +388,10 @@ function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { ag
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [newPort, setNewPort] = useState('')
+  const [portBuilderError, setPortBuilderError] = useState('')
+  const [portBuilderMessage, setPortBuilderMessage] = useState('')
+  const newPortRef = useRef<HTMLInputElement>(null)
   const dirty = JSON.stringify(policy) !== savedSnapshot
 
   useEffect(() => {
@@ -390,6 +418,15 @@ function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { ag
     const port = policy.ports[index].port
     setPolicy(current => ({ ...current, ports: current.ports.filter((_, portIndex) => portIndex !== index) }))
     setSelectedSources(current => current.filter(key => discovered.find(source => source.key === key)?.port !== port))
+  }
+  const addPort = () => {
+    const port = Number(newPort)
+    setPortBuilderError(''); setPortBuilderMessage('')
+    if (!Number.isInteger(port) || port < 1 || port > 65535) { setPortBuilderError('请输入 1 到 65535 的有效端口'); return }
+    if (policy.ports.some(rule => rule.port === port)) { setPortBuilderError(`端口 ${port} 已经在规则中`); return }
+    setPolicy(current => ({ ...current, ports: [...current.ports, plainPortRule(port)] }))
+    setNewPort(''); setPortBuilderMessage(`已添加 TCP 端口 ${port}`); newPortRef.current?.focus()
+    window.setTimeout(() => setPortBuilderMessage(''), 1500)
   }
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setError(''); setMessage('')
@@ -420,10 +457,9 @@ function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { ag
       <div className="discovered-list">{discovered.map(source => <label key={source.key} className={!source.tcp ? 'disabled' : ''}><input type="checkbox" disabled={!source.tcp} checked={selectedSources.includes(source.key)} onChange={event => toggleSource(source, event.target.checked)} /><span className={`service-mark ${source.kind}`}><source.icon size={18} /></span><span className="discovered-main"><strong>{source.title}</strong><small className="mono">{source.detail}</small></span><span className={`rule-state ${source.active ? 'active' : ''}`}>{source.active ? '运行中' : '已配置，未运行'}</span></label>)}{discovered.length === 0 && <Empty text="尚未发现妙妙屋节点或 ForwardX 入口，可在下方手工添加端口" />}</div>
     </section>
     <section className="settings-section">
-      <div className="settings-heading"><div><h2>端口阈值</h2><p>超过弹性额度时只丢弃新的 TCP 握手</p></div></div>
-      <div className="port-settings">{policy.ports.map((port, index) => <div className="port-editor" key={`${port.port}-${index}`}><div className="editor-title"><strong>TCP :{port.port}</strong><button type="button" onClick={() => removePort(index)} title="删除端口规则" aria-label={`删除端口 ${port.port} 规则`}><Trash2 size={17} /></button></div><div className="five-cols"><NumberField label="端口" value={port.port} onChange={value => updatePort(index, 'port', value)} /><NumberField label="单 IP 速率 /s" value={port.per_ip_rate} onChange={value => updatePort(index, 'per_ip_rate', value)} /><NumberField label="单 IP 突发" value={port.per_ip_burst} onChange={value => updatePort(index, 'per_ip_burst', value)} /><NumberField label="端口总速率 /s" value={port.aggregate_rate} onChange={value => updatePort(index, 'aggregate_rate', value)} /><NumberField label="端口总突发" value={port.aggregate_burst} onChange={value => updatePort(index, 'aggregate_burst', value)} /></div></div>)}
-        <button type="button" className="add-rule" onClick={() => setPolicy(current => ({ ...current, ports: [...current.ports, plainPortRule(443)] }))}><Plus size={17} />增加手工端口</button>
-      </div>
+      <div className="settings-heading"><div><h2>端口阈值</h2><p>{policy.ports.length} 条规则 · 超过弹性额度时只丢弃新的 TCP 握手</p></div></div>
+      <div className="rule-builder"><label><span>添加 TCP 端口</span><input ref={newPortRef} type="number" min="1" max="65535" value={newPort} onChange={event => { setNewPort(event.target.value); setPortBuilderError('') }} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addPort() } }} placeholder="例如 443" /></label><button type="button" className="secondary-button" disabled={!newPort} onClick={addPort}><Plus size={17} />添加端口</button><span className={portBuilderError ? 'builder-feedback error' : 'builder-feedback success'} role={portBuilderError ? 'alert' : 'status'} aria-live="polite">{portBuilderError || portBuilderMessage}</span></div>
+      <div className="port-settings">{policy.ports.map((port, index) => <div className={`port-editor ${port.enabled ? '' : 'disabled-rule'}`} key={`${port.port}-${index}`}><div className="editor-title"><span className="rule-identity"><i>TCP</i><strong>端口 {port.port}</strong></span><span className="editor-actions"><label><input type="checkbox" checked={port.enabled} onChange={event => updatePort(index, 'enabled', event.target.checked)} /><span>启用</span></label><button type="button" onClick={() => removePort(index)} title="删除端口规则" aria-label={`删除端口 ${port.port} 规则`}><Trash2 size={17} /></button></span></div><div className="five-cols"><NumberField label="端口" value={port.port} onChange={value => updatePort(index, 'port', value)} /><NumberField label="单 IP 速率 /s" value={port.per_ip_rate} onChange={value => updatePort(index, 'per_ip_rate', value)} /><NumberField label="单 IP 突发" value={port.per_ip_burst} onChange={value => updatePort(index, 'per_ip_burst', value)} /><NumberField label="端口总速率 /s" value={port.aggregate_rate} onChange={value => updatePort(index, 'aggregate_rate', value)} /><NumberField label="端口总突发" value={port.aggregate_burst} onChange={value => updatePort(index, 'aggregate_burst', value)} /></div></div>)}</div>
     </section>
     <section className="settings-section">
       <div className="settings-heading"><div><h2>整机与可信入口</h2><p>可信前置地址不受速率限制，管理端口始终排除</p></div><label className="switch-field"><input type="checkbox" checked={policy.global.enabled} onChange={event => setPolicy(current => ({ ...current, global: { ...current.global, enabled: event.target.checked } }))} /><span>整机规则</span></label></div>
@@ -775,7 +811,7 @@ function ConfirmDialog({ title, description, confirmLabel, busy = false, danger 
 }
 
 function Metric({ icon, title, value, detail, tone }: { icon: ReactNode; title: string; value: string; detail: string; tone: string }) { return <article className={`metric ${tone}`}><div className="metric-head"><h2>{title}</h2><span>{icon}</span></div><p>{detail}</p><strong>{value}</strong></article> }
-function PanelHeader({ icon, title, subtitle }: { icon: ReactNode; title: string; subtitle: string }) { return <div className="panel-header"><span>{icon}</span><div><h2>{title}</h2><p>{subtitle}</p></div></div> }
+function PanelHeader({ icon, title, subtitle, action }: { icon: ReactNode; title: string; subtitle: string; action?: ReactNode }) { return <div className="panel-header"><span>{icon}</span><div className="panel-header-copy"><h2>{title}</h2><p>{subtitle}</p></div>{action && <div className="panel-header-action">{action}</div>}</div> }
 function Empty({ text }: { text: string }) { return <div className="empty"><Clipboard size={26} /><span>{text}</span></div> }
 function NumberField({ label, value, onChange, disabled = false }: { label: string; value: number; onChange: (v: number) => void; disabled?: boolean }) { return <label><span>{label}</span><input type="number" min="1" value={value} onChange={e => onChange(Number(e.target.value))} disabled={disabled} required /></label> }
 function Status({ status, protected: active }: { status: string; protected?: boolean }) { return <span className={`status ${status}`}><i />{status === 'online' ? (active ? '防护中' : '在线') : '离线'}</span> }

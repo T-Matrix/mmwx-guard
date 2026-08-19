@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	MaxTopSources   = 64
+	MaxTopSources   = 256
 	MaxMMWNodes     = 256
 	MaxForwardRules = 512
 )

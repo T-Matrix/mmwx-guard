@@ -9,6 +9,7 @@ import (
 
 const (
 	TypeHello        = "hello"
+	TypeHelloAck     = "hello_ack"
 	TypeTelemetry    = "telemetry"
 	TypeApplyPolicy  = "apply_policy"
 	TypeApplyResult  = "apply_result"

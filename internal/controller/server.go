@@ -245,6 +245,13 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	}()
 	_ = s.store.SetAgentConnected(r.Context(), id, clientIP(r), hello.OS, hello.Arch, hello.Version)
 	_ = s.store.AddEvent(r.Context(), "info", "agent_online", id, "Agent 已连接", nil)
+	ack, _ := protocol.NewMessage(protocol.TypeHelloAck, "", map[string]string{"version": s.version})
+	writeCtx, stopWrite := context.WithTimeout(r.Context(), 10*time.Second)
+	if err := wsjson.Write(writeCtx, conn, ack); err != nil {
+		stopWrite()
+		return
+	}
+	stopWrite()
 	if policy, policyErr := s.store.AgentPolicy(r.Context(), id); policyErr == nil {
 		go func() {
 			ctx, stop := context.WithTimeout(context.Background(), 45*time.Second)

@@ -186,9 +186,6 @@ func (c *Client) connect(ctx context.Context) error {
 	if err := c.write(ctx, conn, hello); err != nil {
 		return err
 	}
-	if err := updater.MarkAgentHealthy(c.options.StateDir, c.options.Version); err != nil {
-		log.Printf("write Agent health marker: %v", err)
-	}
 	readErr := make(chan error, 1)
 	go func() { readErr <- c.readLoop(ctx, conn) }()
 	telemetryTicker := time.NewTicker(5 * time.Second)
@@ -222,6 +219,10 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			return err
 		}
 		switch msg.Type {
+		case protocol.TypeHelloAck:
+			if err := updater.MarkAgentHealthy(c.options.StateDir, c.options.Version); err != nil {
+				log.Printf("write Agent health marker: %v", err)
+			}
 		case protocol.TypeApplyPolicy:
 			var payload protocol.ApplyPolicy
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {

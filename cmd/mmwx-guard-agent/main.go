@@ -28,7 +28,7 @@ func main() {
 		showVersion = flag.Bool("version", false, "print version and exit")
 		applyUpdate = flag.Bool("apply-agent-update", false, "apply a queued Agent update and exit")
 		installPath = flag.String("install-path", "/usr/local/bin/mmwx-guard-agent", "Agent binary path used by the update helper")
-		serviceName = flag.String("service-name", "mmwx-guard-agent.service", "Agent systemd service used by the update helper")
+		serviceName = flag.String("service-name", "mmwx-guard-protection-agent.service", "Agent systemd service used by the update helper")
 	)
 	flag.Parse()
 	if *showVersion {

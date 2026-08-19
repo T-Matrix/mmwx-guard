@@ -91,7 +91,7 @@ curl -fL --retry 3 --connect-timeout 10 \
   "${controller%/}/downloads/mmwx-guard-agent-linux-${arch}" -o "${tmp}"
 chmod 0755 "${tmp}"
 
-systemctl stop mmwx-guard-agent.service 2>/dev/null || true
+systemctl stop mmwx-guard-protection-agent.service 2>/dev/null || true
 install -d -m 0700 /etc/mmwx-guard /var/lib/mmwx-guard
 install -m 0755 "${tmp}" /usr/local/bin/mmwx-guard-agent
 
@@ -101,7 +101,7 @@ install -m 0755 "${tmp}" /usr/local/bin/mmwx-guard-agent
   --token "${token}" \
   --name "${name}"
 
-cat >/etc/systemd/system/mmwx-guard-agent.service <<'UNIT'
+cat >/etc/systemd/system/mmwx-guard-protection-agent.service <<'UNIT'
 [Unit]
 Description=妙妙屋X安全防护 Agent
 After=network-online.target
@@ -123,19 +123,19 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 WantedBy=multi-user.target
 UNIT
 
-cat >/etc/systemd/system/mmwx-guard-agent-update.path <<'UNIT'
+cat >/etc/systemd/system/mmwx-guard-protection-agent-update.path <<'UNIT'
 [Unit]
 Description=Watch for 妙妙屋X安全防护 Agent update requests
 
 [Path]
 PathExists=/var/lib/mmwx-guard/agent-update/request.json
-Unit=mmwx-guard-agent-update.service
+Unit=mmwx-guard-protection-agent-update.service
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
-cat >/etc/systemd/system/mmwx-guard-agent-update.service <<'UNIT'
+cat >/etc/systemd/system/mmwx-guard-protection-agent-update.service <<'UNIT'
 [Unit]
 Description=Apply a verified 妙妙屋X安全防护 Agent update
 After=network-online.target
@@ -144,7 +144,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
-ExecStart=/usr/local/bin/mmwx-guard-agent --apply-agent-update --state-dir /var/lib/mmwx-guard --install-path /usr/local/bin/mmwx-guard-agent --service-name mmwx-guard-agent.service
+ExecStart=/usr/local/bin/mmwx-guard-agent --apply-agent-update --state-dir /var/lib/mmwx-guard --install-path /usr/local/bin/mmwx-guard-agent --service-name mmwx-guard-protection-agent.service
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
@@ -155,6 +155,6 @@ LockPersonality=true
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now mmwx-guard-agent.service mmwx-guard-agent-update.path
+systemctl enable --now mmwx-guard-protection-agent.service mmwx-guard-protection-agent-update.path
 echo "妙妙屋X安全防护 Agent 安装完成"
 `

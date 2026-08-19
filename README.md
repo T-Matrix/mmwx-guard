@@ -57,6 +57,7 @@ go vet ./...
 
 - Agent 以 root 运行，仅用于读取内核遥测和管理专属 nftables 表。
 - Agent 凭据保存在 `/etc/mmwx-guard/agent.json`，权限为 `0600`。
+- 新 Agent 使用独立的 `mmwx-guard-protection-agent.service`，不会覆盖妙妙屋原有 Agent 或授权守卫服务。
 - 更新请求只能引用固定发布仓库、语义版本和固定资产名。
 - 防护策略下发前运行 `nft -c`；安装 Agent 本身不会自动启用任何防护策略。
 

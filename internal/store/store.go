@@ -406,13 +406,15 @@ func (s *Store) Summary(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := map[string]any{"agents_total": len(agents), "agents_online": 0, "sockets": 0, "conntrack": uint64(0), "dropped": uint64(0), "protected": 0}
+	result := map[string]any{"agents_total": len(agents), "agents_online": 0, "sockets": 0, "established": 0, "time_wait": 0, "conntrack": uint64(0), "dropped": uint64(0), "protected": 0}
 	for _, a := range agents {
 		if a.Status == "online" {
 			result["agents_online"] = result["agents_online"].(int) + 1
 		}
 		if a.Telemetry != nil {
 			result["sockets"] = result["sockets"].(int) + a.Telemetry.Sockets.Total
+			result["established"] = result["established"].(int) + a.Telemetry.Sockets.Established
+			result["time_wait"] = result["time_wait"].(int) + a.Telemetry.Sockets.TimeWait
 			result["conntrack"] = result["conntrack"].(uint64) + a.Telemetry.Conntrack
 			result["dropped"] = result["dropped"].(uint64) + a.Telemetry.DroppedTotal
 			if a.Telemetry.Protected {

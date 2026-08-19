@@ -14,6 +14,33 @@ type SocketStats struct {
 	TimeWait    int `json:"time_wait"`
 }
 
+type MMWIntegration struct {
+	Active         bool   `json:"active"`
+	MasterURL      string `json:"master_url,omitempty"`
+	ConnectionMode string `json:"connection_mode,omitempty"`
+	XrayMode       string `json:"xray_mode,omitempty"`
+}
+
+type ForwardRule struct {
+	ID         string `json:"id"`
+	Protocol   string `json:"protocol"`
+	Listen     string `json:"listen"`
+	ListenPort uint16 `json:"listen_port"`
+	Remote     string `json:"remote"`
+	Active     bool   `json:"active"`
+}
+
+type ForwardXIntegration struct {
+	Active   bool          `json:"active"`
+	PanelURL string        `json:"panel_url,omitempty"`
+	Rules    []ForwardRule `json:"rules"`
+}
+
+type Integrations struct {
+	MMW      *MMWIntegration      `json:"mmw,omitempty"`
+	ForwardX *ForwardXIntegration `json:"forwardx,omitempty"`
+}
+
 type Telemetry struct {
 	CollectedAt    string        `json:"collected_at"`
 	CPUUsage       float64       `json:"cpu_usage"`
@@ -28,6 +55,7 @@ type Telemetry struct {
 	Protected      bool          `json:"protected"`
 	PolicyRevision int64         `json:"policy_revision"`
 	TopSources     []SourceCount `json:"top_sources"`
+	Integrations   Integrations  `json:"integrations"`
 }
 
 type AgentSummary struct {

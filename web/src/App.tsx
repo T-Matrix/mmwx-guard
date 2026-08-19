@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity, AlertTriangle, Check, ChevronDown, CircleGauge, Clipboard, Copy,
-  Cpu, Download, ExternalLink, FileClock, Filter, ListFilter, LogOut, Moon,
+  Cable, Cpu, Download, ExternalLink, FileClock, Filter, ListFilter, LogOut, Moon,
   Network, PackageCheck, Pencil, Plus, RefreshCw, Server, ShieldCheck, ShieldX, Sun,
   Trash2, X, Zap,
 } from 'lucide-react'
@@ -9,9 +9,10 @@ import { api } from './api'
 import type { Agent, EventItem, Policy, PortRule, SourceCount, Status as SystemStatus, UpdateInfo } from './api'
 
 type Tab = 'overview' | 'agents' | 'policies' | 'events' | 'updates'
-type Summary = { agents_total: number; agents_online: number; sockets: number; conntrack: number; dropped: number; protected: number }
+type Summary = { agents_total: number; agents_online: number; sockets: number; established: number; time_wait: number; conntrack: number; dropped: number; protected: number }
+type EditablePortRule = PortRule & { manual: boolean; source_rules: string[] }
 
-const defaultSummary: Summary = { agents_total: 0, agents_online: 0, sockets: 0, conntrack: 0, dropped: 0, protected: 0 }
+const defaultSummary: Summary = { agents_total: 0, agents_online: 0, sockets: 0, established: 0, time_wait: 0, conntrack: 0, dropped: 0, protected: 0 }
 
 function App() {
   const [status, setStatus] = useState<SystemStatus | null>(null)
@@ -95,7 +96,7 @@ function App() {
       </main>
       {enrollOpen && <EnrollmentDialog onClose={() => setEnrollOpen(false)} />}
       {renameAgent && <RenameAgentDialog agent={renameAgent} onClose={() => setRenameAgent(null)} onSaved={() => { setRenameAgent(null); void refresh() }} />}
-      {policyOpen && <PolicyDialog onClose={() => setPolicyOpen(false)} onSaved={() => { setPolicyOpen(false); void refresh() }} />}
+      {policyOpen && <PolicyDialog agents={agents} onClose={() => setPolicyOpen(false)} onSaved={() => { setPolicyOpen(false); void refresh() }} />}
       {deployPolicy && <DeployDialog policy={deployPolicy} agents={agents} onClose={() => setDeployPolicy(null)} onDone={() => { setDeployPolicy(null); void refresh() }} />}
     </div>
   )
@@ -146,7 +147,8 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
   return <>
     <section className="metric-grid" aria-label="核心指标">
       <Metric icon={<Server />} title="在线服务器" value={`${summary.agents_online} / ${summary.agents_total}`} detail={`${summary.protected} 台已启用防护`} tone="coral" />
-      <Metric icon={<Network />} title="当前连接" value={formatNumber(summary.sockets)} detail="所有服务器 TCP socket" tone="blue" />
+      <Metric icon={<Network />} title="ESTABLISHED" value={formatNumber(summary.established)} detail="当前已建立 TCP 连接" tone="blue" />
+      <Metric icon={<Network />} title="TIME_WAIT" value={formatNumber(summary.time_wait)} detail="等待内核回收的 TCP 连接" tone="coral" />
       <Metric icon={<CircleGauge />} title="连接跟踪" value={formatNumber(summary.conntrack)} detail="内核 conntrack 当前记录" tone="amber" />
       <Metric icon={<ShieldX />} title="累计拦截" value={formatNumber(summary.dropped)} detail="超额新建连接已丢弃" tone="red" />
     </section>
@@ -165,9 +167,9 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
     </section>
     <section className="panel fleet-panel">
       <PanelHeader icon={<Cpu size={21} />} title="服务器状态" subtitle="实时负载、内存和连接压力" />
-      <div className="table-wrap"><table><thead><tr><th>服务器</th><th>状态</th><th>IP 地址</th><th>负载</th><th>内存</th><th>连接</th><th>拦截</th><th>策略</th></tr></thead><tbody>
-        {agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>{agent.os} / {agent.arch}</small></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry ? agent.telemetry.load_1.toFixed(2) : '-'}</td><td>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</td><td>{formatNumber(agent.telemetry?.sockets.total || 0)}</td><td className="danger-text">{formatNumber(agent.telemetry?.dropped_total || 0)}</td><td>{agent.policy_name || '未下发'}</td></tr>)}
-        {agents.length === 0 && <tr><td colSpan={8}><Empty text="还没有服务器，前往服务器管理添加第一台" /></td></tr>}
+      <div className="table-wrap"><table><thead><tr><th>服务器</th><th>状态</th><th>IP 地址</th><th>负载</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>拦截</th><th>策略</th></tr></thead><tbody>
+        {agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>{agent.os} / {agent.arch}</small></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry ? agent.telemetry.load_1.toFixed(2) : '-'}</td><td>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td className="danger-text">{formatNumber(agent.telemetry?.dropped_total || 0)}</td><td>{agent.policy_name || '未下发'}</td></tr>)}
+        {agents.length === 0 && <tr><td colSpan={9}><Empty text="还没有服务器，前往服务器管理添加第一台" /></td></tr>}
       </tbody></table></div>
     </section>
   </>
@@ -176,9 +178,9 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
 function Agents({ agents, policies, onEnroll, onDeploy, onRename, onDelete }: { agents: Agent[]; policies: Policy[]; onEnroll: () => void; onDeploy: (p: Policy) => void; onRename: (agent: Agent) => void; onDelete: (id: string) => Promise<void> }) {
   return <section className="panel management-panel">
     <div className="section-toolbar"><div><h2>服务器列表 ({agents.length})</h2><p>Agent 使用主动连接，不需要向公网开放管理端口</p></div><button className="primary-button" onClick={onEnroll}><Plus size={18} />添加服务器</button></div>
-    <div className="table-wrap"><table className="agent-table"><thead><tr><th>名称</th><th>连接状态</th><th>公网 IP</th><th>CPU</th><th>内存</th><th>Socket</th><th>SYN 堆积</th><th>Conntrack</th><th>防护策略</th><th>操作</th></tr></thead><tbody>
-      {agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.total || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name || <span className="muted">未下发</span>}</td><td><div className="row-actions">{policies[0] && <button title="下发策略" onClick={() => onDeploy(policies[0])}><ShieldCheck size={18} /></button>}<button title="修改名称" onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" className="danger" onClick={() => void onDelete(agent.id)}><Trash2 size={18} /></button></div></td></tr>)}
-      {agents.length === 0 && <tr><td colSpan={10}><Empty text="点击“添加服务器”生成一次性安装命令" /></td></tr>}
+    <div className="table-wrap"><table className="agent-table"><thead><tr><th>名称</th><th>连接状态</th><th>公网 IP</th><th>CPU</th><th>内存</th><th>ESTABLISHED</th><th>TIME_WAIT</th><th>SYN 堆积</th><th>Conntrack</th><th>防护策略</th><th>操作</th></tr></thead><tbody>
+      {agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small><IntegrationBadges agent={agent} /></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.established || 0)}</td><td>{formatNumber(agent.telemetry?.sockets.time_wait || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name || <span className="muted">未下发</span>}</td><td><div className="row-actions">{policies[0] && <button title="下发策略" onClick={() => onDeploy(policies[0])}><ShieldCheck size={18} /></button>}<button title="修改名称" onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" className="danger" onClick={() => void onDelete(agent.id)}><Trash2 size={18} /></button></div></td></tr>)}
+      {agents.length === 0 && <tr><td colSpan={11}><Empty text="点击“添加服务器”生成一次性安装命令" /></td></tr>}
     </tbody></table></div>
   </section>
 }
@@ -308,24 +310,71 @@ function RenameAgentDialog({ agent, onClose, onSaved }: { agent: Agent; onClose:
   </Modal>
 }
 
-function PolicyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+function PolicyDialog({ agents, onClose, onSaved }: { agents: Agent[]; onClose: () => void; onSaved: () => void }) {
+  const forwardAgents = agents.filter(agent => (agent.telemetry?.integrations?.forwardx?.rules.length || 0) > 0)
+  const initialAgent = forwardAgents.find(agent => agent.status === 'online' && agent.telemetry?.integrations?.forwardx?.active) || forwardAgents[0]
+  const initialRules = initialAgent?.telemetry?.integrations?.forwardx?.rules.filter(rule => rule.active && supportsTCP(rule.protocol)) || []
   const [name, setName] = useState('弹性连接防护')
-  const [ports, setPorts] = useState<PortRule[]>([{ port: 15542, per_ip_rate: 100, per_ip_burst: 500, aggregate_rate: 300, aggregate_burst: 1500, enabled: true }])
+  const [sourceAgentID, setSourceAgentID] = useState(initialAgent?.id || '')
+  const [selectedRules, setSelectedRules] = useState<string[]>(() => initialRules.map(rule => forwardRuleKey(initialAgent.id, rule.id)))
+  const [ports, setPorts] = useState<EditablePortRule[]>(() => {
+    if (forwardAgents.length === 0) return [newPortRule(15542, true)]
+    const grouped = new Map<number, EditablePortRule>()
+    initialRules.forEach(rule => {
+      const key = forwardRuleKey(initialAgent.id, rule.id)
+      const existing = grouped.get(rule.listen_port)
+      if (existing) existing.source_rules.push(key)
+      else grouped.set(rule.listen_port, { ...newPortRule(rule.listen_port, false), source_rules: [key] })
+    })
+    return [...grouped.values()]
+  })
   const [globalRate, setGlobalRate] = useState(800)
   const [globalBurst, setGlobalBurst] = useState(4000)
   const [exemptPorts, setExemptPorts] = useState('22,48357')
   const [trusted, setTrusted] = useState('')
   const [busy, setBusy] = useState(false)
   const updatePort = (index: number, field: keyof PortRule, value: number | boolean) => setPorts(current => current.map((p, i) => i === index ? { ...p, [field]: value } : p))
+  const sourceAgent = forwardAgents.find(agent => agent.id === sourceAgentID)
+  const sourceRules = sourceAgent?.telemetry?.integrations?.forwardx?.rules || []
+  const toggleForwardRule = (ruleID: string, listenPort: number, checked: boolean) => {
+    const key = forwardRuleKey(sourceAgentID, ruleID)
+    setSelectedRules(current => checked ? [...new Set([...current, key])] : current.filter(value => value !== key))
+    setPorts(current => {
+      if (checked) {
+        const found = current.findIndex(rule => rule.port === listenPort)
+        if (found < 0) return [...current, { ...newPortRule(listenPort, false), source_rules: [key] }]
+        return current.map((rule, index) => index === found ? { ...rule, source_rules: [...new Set([...rule.source_rules, key])] } : rule)
+      }
+      return current.flatMap(rule => {
+        if (!rule.source_rules.includes(key)) return [rule]
+        const sourceRules = rule.source_rules.filter(value => value !== key)
+        return rule.manual || sourceRules.length > 0 ? [{ ...rule, source_rules: sourceRules }] : []
+      })
+    })
+  }
+  const removePort = (index: number) => {
+    const removed = ports[index]
+    setSelectedRules(current => current.filter(key => !removed.source_rules.includes(key)))
+    setPorts(current => current.filter((_, portIndex) => portIndex !== index))
+  }
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setBusy(true)
-    const policy = { id: 0, revision: 1, name, enabled: true, ports, global: { rate: globalRate, burst: globalBurst, exempt_ports: exemptPorts.split(',').map(Number).filter(Boolean), enabled: true }, trusted_cidrs: trusted.split(/[\s,]+/).filter(Boolean), syn_sent_timeout: 15, syn_recv_timeout: 30 }
+    const cleanPorts: PortRule[] = ports.map(({ manual: _manual, source_rules: _sourceRules, ...rule }) => rule)
+    const policy = { id: 0, revision: 1, name, enabled: true, ports: cleanPorts, global: { rate: globalRate, burst: globalBurst, exempt_ports: exemptPorts.split(',').map(Number).filter(Boolean), enabled: true }, trusted_cidrs: trusted.split(/[\s,]+/).filter(Boolean), syn_sent_timeout: 15, syn_recv_timeout: 30 }
     try { await api('/api/admin/policies', { method: 'POST', body: JSON.stringify(policy) }); onSaved() } finally { setBusy(false) }
   }
   return <Modal wide title="新建防护策略" subtitle="令牌桶允许短时突发，持续超额才会丢弃" onClose={onClose}>
     <form onSubmit={submit} className="form-grid policy-form"><label className="full"><span>策略名称</span><input value={name} onChange={e => setName(e.target.value)} required /></label>
-      {ports.map((port, index) => <div className="port-editor full" key={index}><div className="editor-title"><strong>TCP 端口规则 {index + 1}</strong>{ports.length > 1 && <button type="button" onClick={() => setPorts(p => p.filter((_, i) => i !== index))}><Trash2 size={17} /></button>}</div><div className="five-cols"><NumberField label="端口" value={port.port} onChange={v => updatePort(index, 'port', v)} /><NumberField label="单IP速率 /s" value={port.per_ip_rate} onChange={v => updatePort(index, 'per_ip_rate', v)} /><NumberField label="单IP突发" value={port.per_ip_burst} onChange={v => updatePort(index, 'per_ip_burst', v)} /><NumberField label="总速率 /s" value={port.aggregate_rate} onChange={v => updatePort(index, 'aggregate_rate', v)} /><NumberField label="总突发" value={port.aggregate_burst} onChange={v => updatePort(index, 'aggregate_burst', v)} /></div></div>)}
-      <button type="button" className="add-rule full" onClick={() => setPorts(p => [...p, { port: 443, per_ip_rate: 100, per_ip_burst: 500, aggregate_rate: 300, aggregate_burst: 1500, enabled: true }])}><Plus size={17} />增加端口规则</button>
+      {forwardAgents.length > 0 && <section className="integration-picker full">
+        <div className="integration-picker-head"><div><strong><Cable size={18} />ForwardX 转发规则</strong><small>已勾选的 TCP 入口会加入下方端口规则</small></div><label><span>来源服务器</span><select value={sourceAgentID} onChange={e => setSourceAgentID(e.target.value)}>{forwardAgents.map(agent => <option key={agent.id} value={agent.id}>{agent.name} ({agent.telemetry?.integrations?.forwardx?.rules.length || 0} 条)</option>)}</select></label></div>
+        <div className="forward-rule-list">{sourceRules.map(rule => {
+          const tcp = supportsTCP(rule.protocol)
+          const key = forwardRuleKey(sourceAgentID, rule.id)
+          return <label key={rule.id} className={!tcp ? 'disabled' : ''} title={!tcp ? 'UDP 不经过 TCP SYN 防护' : `${rule.listen} -> ${rule.remote}`}><input type="checkbox" disabled={!tcp} checked={selectedRules.includes(key)} onChange={e => toggleForwardRule(rule.id, rule.listen_port, e.target.checked)} /><span className="forward-rule-main"><strong><i>{rule.protocol.toUpperCase()}</i>{rule.listen}</strong><small>转发至 {rule.remote}</small></span><span className={`rule-state ${rule.active ? 'active' : ''}`}>{rule.active ? '运行中' : '未运行'}</span></label>
+        })}</div>
+      </section>}
+      {ports.map((port, index) => <div className="port-editor full" key={`${port.port}-${index}`}><div className="editor-title"><strong>TCP 端口规则 {index + 1}{port.source_rules.length > 0 && <small>ForwardX</small>}</strong><button type="button" onClick={() => removePort(index)} title="删除端口规则" aria-label={`删除端口 ${port.port} 规则`}><Trash2 size={17} /></button></div><div className="five-cols"><NumberField label="端口" value={port.port} onChange={v => updatePort(index, 'port', v)} disabled={port.source_rules.length > 0} /><NumberField label="单IP速率 /s" value={port.per_ip_rate} onChange={v => updatePort(index, 'per_ip_rate', v)} /><NumberField label="单IP突发" value={port.per_ip_burst} onChange={v => updatePort(index, 'per_ip_burst', v)} /><NumberField label="总速率 /s" value={port.aggregate_rate} onChange={v => updatePort(index, 'aggregate_rate', v)} /><NumberField label="总突发" value={port.aggregate_burst} onChange={v => updatePort(index, 'aggregate_burst', v)} /></div></div>)}
+      <button type="button" className="add-rule full" onClick={() => setPorts(p => [...p, newPortRule(443, true)])}><Plus size={17} />增加手工端口规则</button>
       <NumberField label="整机 SYN 速率 /s" value={globalRate} onChange={setGlobalRate} /><NumberField label="整机突发额度" value={globalBurst} onChange={setGlobalBurst} /><label><span>永久排除端口</span><input value={exemptPorts} onChange={e => setExemptPorts(e.target.value)} placeholder="22,48357" /></label><label className="full"><span>可信前置 IP / CIDR</span><textarea value={trusted} onChange={e => setTrusted(e.target.value)} placeholder="每行一个，例如 212.17.236.133/32" /></label>
       <div className="dialog-actions full"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy}>{busy ? '保存中...' : '保存策略'}</button></div>
     </form>
@@ -359,8 +408,16 @@ function Modal({ title, subtitle, onClose, children, wide = false }: { title: st
 function Metric({ icon, title, value, detail, tone }: { icon: ReactNode; title: string; value: string; detail: string; tone: string }) { return <article className={`metric ${tone}`}><div className="metric-head"><h2>{title}</h2><span>{icon}</span></div><p>{detail}</p><strong>{value}</strong></article> }
 function PanelHeader({ icon, title, subtitle }: { icon: ReactNode; title: string; subtitle: string }) { return <div className="panel-header"><span>{icon}</span><div><h2>{title}</h2><p>{subtitle}</p></div></div> }
 function Empty({ text }: { text: string }) { return <div className="empty"><Clipboard size={26} /><span>{text}</span></div> }
-function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) { return <label><span>{label}</span><input type="number" min="1" value={value} onChange={e => onChange(Number(e.target.value))} required /></label> }
+function NumberField({ label, value, onChange, disabled = false }: { label: string; value: number; onChange: (v: number) => void; disabled?: boolean }) { return <label><span>{label}</span><input type="number" min="1" value={value} onChange={e => onChange(Number(e.target.value))} disabled={disabled} required /></label> }
 function Status({ status, protected: active }: { status: string; protected?: boolean }) { return <span className={`status ${status}`}><i />{status === 'online' ? (active ? '防护中' : '在线') : '离线'}</span> }
+function IntegrationBadges({ agent }: { agent: Agent }) {
+  const integrations = agent.telemetry?.integrations
+  if (!integrations?.mmw && !integrations?.forwardx) return null
+  return <div className="integration-badges">
+    {integrations.mmw && <span className={integrations.mmw.active ? 'active' : ''} title={`${integrations.mmw.active ? '运行中' : '已发现但未运行'}${integrations.mmw.master_url ? ` · ${integrations.mmw.master_url}` : ''}`}><Server size={12} />妙妙屋 Agent</span>}
+    {integrations.forwardx && <span className={integrations.forwardx.active ? 'active' : ''} title={`${integrations.forwardx.active ? '运行中' : '已发现但未运行'}${integrations.forwardx.panel_url ? ` · ${integrations.forwardx.panel_url}` : ''}`}><Cable size={12} />ForwardX {integrations.forwardx.rules.length} 条</span>}
+  </div>
+}
 function StatusDot({ level }: { level: string }) { return <i className={`status-dot ${level}`} /> }
 function EventLevel({ level }: { level: string }) { const labels: Record<string, string> = { info: '信息', warning: '警告', error: '失败' }; return <span className={`event-level ${level}`}>{labels[level] || level}</span> }
 function LoadingScreen() { return <div className="loading-screen login-pixel-bg"><img className="loading-logo" src="/images/logo.webp" alt="妙妙屋 Logo" /><p>正在检查系统状态...</p></div> }
@@ -375,5 +432,8 @@ function percentage(used: number, total: number) { return total ? `${Math.round(
 function formatMemory(bytes: number) { if (!bytes) return '-'; const gibibytes = bytes / 1024 ** 3; return gibibytes >= 1 ? `${gibibytes.toFixed(gibibytes >= 10 ? 0 : 1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB` }
 function formatTime(value: string) { if (!value) return '-'; return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
 function relativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return `${seconds}秒前`; if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`; return `${Math.floor(seconds / 86400)}天前` }
+function supportsTCP(protocol: string) { return protocol.toLowerCase() === 'tcp' || protocol.toLowerCase() === 'tcp+udp' }
+function forwardRuleKey(agentID: string, ruleID: string) { return `${agentID}:${ruleID}` }
+function newPortRule(port: number, manual: boolean): EditablePortRule { return { port, per_ip_rate: 100, per_ip_burst: 500, aggregate_rate: 300, aggregate_burst: 1500, enabled: true, manual, source_rules: [] } }
 
 export default App

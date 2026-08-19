@@ -15,15 +15,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/T-Matrix/mmwx-guard/internal/discovery"
 	"github.com/T-Matrix/mmwx-guard/internal/firewall"
 	"github.com/T-Matrix/mmwx-guard/internal/model"
 )
 
 type Collector struct {
-	firewall *firewall.Manager
-	cpuMu    sync.Mutex
-	lastCPU  cpuSample
-	hasCPU   bool
+	firewall     *firewall.Manager
+	cpuMu        sync.Mutex
+	lastCPU      cpuSample
+	hasCPU       bool
+	discoveryMu  sync.Mutex
+	integrations model.Integrations
+	discoveredAt time.Time
 }
 
 func NewCollector(manager *firewall.Manager) *Collector {
@@ -39,6 +43,7 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 	t.ConntrackMax = readUint("/proc/sys/net/netfilter/nf_conntrack_max")
 	t.Sockets, t.TopSources = socketStats(ctx)
 	t.Protected, t.DroppedTotal = nftStats(ctx)
+	t.Integrations = c.integrationStats(ctx)
 	if policy, err := c.firewall.CurrentPolicy(); err == nil {
 		t.PolicyRevision = policy.Revision
 	}
@@ -47,6 +52,17 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 		t.TopSources = t.TopSources[:20]
 	}
 	return t
+}
+
+func (c *Collector) integrationStats(ctx context.Context) model.Integrations {
+	c.discoveryMu.Lock()
+	defer c.discoveryMu.Unlock()
+	if !c.discoveredAt.IsZero() && time.Since(c.discoveredAt) < 30*time.Second {
+		return c.integrations
+	}
+	c.integrations = discovery.Discover(ctx, discovery.DefaultOptions())
+	c.discoveredAt = time.Now()
+	return c.integrations
 }
 
 type cpuSample struct {

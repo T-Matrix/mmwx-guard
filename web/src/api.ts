@@ -7,6 +7,11 @@ export type Status = {
 }
 
 export type SourceCount = { ip: string; connections: number; dropped?: number }
+export type ForwardRule = { id: string; protocol: string; listen: string; listen_port: number; remote: string; active: boolean }
+export type Integrations = {
+  mmw?: { active: boolean; master_url?: string; connection_mode?: string; xray_mode?: string }
+  forwardx?: { active: boolean; panel_url?: string; rules: ForwardRule[] }
+}
 export type Telemetry = {
   collected_at: string
   cpu_usage?: number
@@ -21,6 +26,7 @@ export type Telemetry = {
   protected: boolean
   policy_revision: number
   top_sources: SourceCount[]
+  integrations?: Integrations
 }
 
 export type Agent = {

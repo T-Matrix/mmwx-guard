@@ -1,0 +1,19 @@
+[Unit]
+Description=Apply a verified 妙妙屋X安全防护 controller update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/mmwx-guard --apply-update --release-repo T-Matrix/mmwx-guard --update-dir /var/lib/mmwx-guard/update --install-path /usr/local/bin/mmwx-guard --agent-dir /usr/lib/mmwx-guard --service-name mmwx-guard.service --health-url http://127.0.0.1:9080/healthz
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/usr/local/bin /usr/lib/mmwx-guard /var/lib/mmwx-guard
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

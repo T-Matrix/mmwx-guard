@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm build
+        working-directory: web
+      - name: Build Linux binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "release/mmwx-guard-linux-${arch}" ./cmd/mmwx-guard
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "release/mmwx-guard-agent-linux-${arch}" ./cmd/mmwx-guard-agent
+          done
+          cp scripts/install-controller.sh release/install-controller.sh
+          chmod 0755 release/*
+      - name: Generate checksums and manifest
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum mmwx-guard-linux-* mmwx-guard-agent-linux-* > SHA256SUMS
+          node <<'NODE'
+          const crypto = require('crypto')
+          const fs = require('fs')
+          const names = fs.readdirSync('.').filter(name => /^mmwx-guard(?:-agent)?-linux-(?:amd64|arm64)$/.test(name)).sort()
+          const assets = {}
+          for (const name of names) {
+            const data = fs.readFileSync(name)
+            assets[name] = { sha256: crypto.createHash('sha256').update(data).digest('hex'), size: data.length }
+          }
+          fs.writeFileSync('manifest.json', JSON.stringify({
+            version: process.env.VERSION,
+            published_at: new Date().toISOString(),
+            assets,
+          }, null, 2) + '\n')
+          NODE
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release/mmwx-guard-linux-amd64
+            release/mmwx-guard-linux-arm64
+            release/mmwx-guard-agent-linux-amd64
+            release/mmwx-guard-agent-linux-arm64
+            release/install-controller.sh
+            release/SHA256SUMS
+            release/manifest.json

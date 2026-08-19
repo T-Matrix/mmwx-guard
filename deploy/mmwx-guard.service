@@ -1,0 +1,25 @@
+[Unit]
+Description=妙妙屋X安全防护 Controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mmwx-guard
+Group=mmwx-guard
+ExecStart=/usr/local/bin/mmwx-guard --listen 127.0.0.1:9080 --database /var/lib/mmwx-guard/controller.db --public-url https://mmwxfh.tty.mom --agent-dir /usr/lib/mmwx-guard --update-dir /var/lib/mmwx-guard/update --release-repo T-Matrix/mmwx-guard
+Restart=always
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mmwx-guard
+StateDirectory=mmwx-guard
+StateDirectoryMode=0750
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

@@ -35,3 +35,12 @@ func TestManifestValidate(t *testing.T) {
 		t.Fatal("manifest with unsafe asset name was accepted")
 	}
 }
+
+func TestIsNativeAsset(t *testing.T) {
+	if !isNativeAsset("mmwx-guard-agent-linux-amd64", "amd64") {
+		t.Fatal("native amd64 Agent was not selected for execution")
+	}
+	if isNativeAsset("mmwx-guard-agent-linux-arm64", "amd64") {
+		t.Fatal("cross-architecture Agent was selected for execution")
+	}
+}

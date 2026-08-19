@@ -96,8 +96,10 @@ func ApplyControllerUpdate(ctx context.Context, options ApplyOptions) (returnErr
 		if closeErr != nil {
 			return closeErr
 		}
-		if err := verifyBinaryVersion(ctx, path, manifest.Version); err != nil {
-			return fmt.Errorf("validate %s: %w", name, err)
+		if isNativeAsset(name, runtime.GOARCH) {
+			if err := verifyBinaryVersion(ctx, path, manifest.Version); err != nil {
+				return fmt.Errorf("validate %s: %w", name, err)
+			}
 		}
 	}
 
@@ -139,6 +141,10 @@ func ApplyControllerUpdate(ctx context.Context, options ApplyOptions) (returnErr
 	}
 	setStatus("completed", "主控与内置 Agent 已更新到 "+manifest.Version)
 	return nil
+}
+
+func isNativeAsset(name, arch string) bool {
+	return strings.HasSuffix(name, "-"+arch)
 }
 
 func verifyBinaryVersion(ctx context.Context, path, expected string) error {

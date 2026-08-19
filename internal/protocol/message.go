@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ const (
 	TypeRotateCredential   = "rotate_credential"
 	TypeRotateResult       = "rotate_result"
 	TypeControllerVerified = "controller_verified"
+	TypeAddressReport      = "address_report"
 	TypeRollback           = "rollback_policy"
 	TypePing               = "ping"
 	TypePong               = "pong"
@@ -146,4 +148,32 @@ type RotateCredential struct {
 
 type ControllerVerified struct {
 	Fingerprint string `json:"fingerprint"`
+}
+
+type AddressReport struct {
+	IPv4 string `json:"ipv4,omitempty"`
+	IPv6 string `json:"ipv6,omitempty"`
+}
+
+func ValidateAddressReport(report AddressReport) error {
+	if report.IPv4 == "" && report.IPv6 == "" {
+		return errors.New("address report is empty")
+	}
+	if report.IPv4 != "" {
+		address, err := netip.ParseAddr(report.IPv4)
+		if err != nil || !address.Is4() || !publicAddress(address) {
+			return errors.New("address report contains an invalid public IPv4 address")
+		}
+	}
+	if report.IPv6 != "" {
+		address, err := netip.ParseAddr(report.IPv6)
+		if err != nil || address.Is4() || !publicAddress(address) {
+			return errors.New("address report contains an invalid public IPv6 address")
+		}
+	}
+	return nil
+}
+
+func publicAddress(address netip.Addr) bool {
+	return address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast()
 }

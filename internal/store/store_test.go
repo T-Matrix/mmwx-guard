@@ -58,6 +58,31 @@ func TestRenameAgent(t *testing.T) {
 	}
 }
 
+func TestSetAgentPublicAddresses(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	ctx := context.Background()
+	if err := storage.CreateAgent(ctx, NewAgent{ID: "agent-1", Name: "dual-stack", MachineID: "machine-1", SecretHash: "hash"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.SetAgentPublicAddresses(ctx, "agent-1", "104.251.231.10", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.SetAgentPublicAddresses(ctx, "agent-1", "", "2605:52c0:1:1313:8022:3ff:fe12:4fce"); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := storage.ListAgents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].IPv4Address != "104.251.231.10" || agents[0].IPv6Address != "2605:52c0:1:1313:8022:3ff:fe12:4fce" || agents[0].AddressUpdatedAt == "" {
+		t.Fatalf("public addresses = %#v", agents)
+	}
+}
+
 func TestAgentCredentialsReturnsMachineBinding(t *testing.T) {
 	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {

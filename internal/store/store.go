@@ -91,6 +91,9 @@ CREATE TABLE IF NOT EXISTS agents (
 	secure_channel INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'offline',
     ip_address TEXT NOT NULL DEFAULT '',
+	ipv4_address TEXT NOT NULL DEFAULT '',
+	ipv6_address TEXT NOT NULL DEFAULT '',
+	address_updated_at TEXT NOT NULL DEFAULT '',
     os TEXT NOT NULL DEFAULT '',
     arch TEXT NOT NULL DEFAULT '',
     version TEXT NOT NULL DEFAULT '',
@@ -132,6 +135,9 @@ CREATE TABLE IF NOT EXISTS events (
 		{"agents", "controller_key_fingerprint", "TEXT NOT NULL DEFAULT ''"},
 		{"agents", "controller_verified_at", "TEXT NOT NULL DEFAULT ''"},
 		{"agents", "secure_channel", "INTEGER NOT NULL DEFAULT 0"},
+		{"agents", "ipv4_address", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "ipv6_address", "TEXT NOT NULL DEFAULT ''"},
+		{"agents", "address_updated_at", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, column := range columns {
 		if err := s.ensureColumn(column.table, column.name, column.definition); err != nil {
@@ -318,6 +324,20 @@ func (s *Store) SetAgentConnected(ctx context.Context, id, ip, osName, arch, ver
 	return err
 }
 
+func (s *Store) SetAgentPublicAddresses(ctx context.Context, id, ipv4, ipv6 string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE agents SET
+		ipv4_address=CASE WHEN ?<>'' THEN ? ELSE ipv4_address END,
+		ipv6_address=CASE WHEN ?<>'' THEN ? ELSE ipv6_address END,
+		address_updated_at=? WHERE id=?`, ipv4, ipv4, ipv6, ipv6, now(), id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) MarkControllerVerified(ctx context.Context, id, fingerprint string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE agents SET controller_key_fingerprint=?,controller_verified_at=? WHERE id=?`, fingerprint, now(), id)
 	return err
@@ -393,7 +413,7 @@ func (s *Store) UpdateTelemetry(ctx context.Context, id string, telemetry model.
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]model.AgentSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.name,a.status,a.ip_address,a.os,a.arch,a.version,a.last_seen,COALESCE(a.policy_id,0),COALESCE(p.name,''),a.policy_revision,a.telemetry_json,a.pending_secret_hash,a.pending_secret_expires_at,a.credential_rotated_at,a.credential_revoked_at,a.last_authenticated_at,a.controller_key_fingerprint,a.controller_verified_at,a.secure_channel FROM agents a LEFT JOIN policies p ON p.id=a.policy_id ORDER BY a.name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.name,a.status,a.ip_address,a.ipv4_address,a.ipv6_address,a.address_updated_at,a.os,a.arch,a.version,a.last_seen,COALESCE(a.policy_id,0),COALESCE(p.name,''),a.policy_revision,a.telemetry_json,a.pending_secret_hash,a.pending_secret_expires_at,a.credential_rotated_at,a.credential_revoked_at,a.last_authenticated_at,a.controller_key_fingerprint,a.controller_verified_at,a.secure_channel FROM agents a LEFT JOIN policies p ON p.id=a.policy_id ORDER BY a.name`)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +423,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]model.AgentSummary, error) {
 		var a model.AgentSummary
 		var telemetry sql.NullString
 		var pendingHash, pendingExpires string
-		if err := rows.Scan(&a.ID, &a.Name, &a.Status, &a.IPAddress, &a.OS, &a.Arch, &a.Version, &a.LastSeen, &a.PolicyID, &a.PolicyName, &a.PolicyRevision, &telemetry, &pendingHash, &pendingExpires, &a.CredentialRotatedAt, &a.CredentialRevokedAt, &a.LastAuthenticatedAt, &a.ControllerKeyFingerprint, &a.ControllerVerifiedAt, &a.SecureChannel); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Status, &a.IPAddress, &a.IPv4Address, &a.IPv6Address, &a.AddressUpdatedAt, &a.OS, &a.Arch, &a.Version, &a.LastSeen, &a.PolicyID, &a.PolicyName, &a.PolicyRevision, &telemetry, &pendingHash, &pendingExpires, &a.CredentialRotatedAt, &a.CredentialRevokedAt, &a.LastAuthenticatedAt, &a.ControllerKeyFingerprint, &a.ControllerVerifiedAt, &a.SecureChannel); err != nil {
 			return nil, err
 		}
 		a.CredentialState = "active"

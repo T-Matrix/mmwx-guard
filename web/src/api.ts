@@ -38,6 +38,9 @@ export type Agent = {
   name: string
   status: 'online' | 'offline'
   ip_address: string
+	ipv4_address?: string
+	ipv6_address?: string
+	address_updated_at?: string
   os: string
   arch: string
   version: string

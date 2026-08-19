@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /install-agent.sh", s.handleInstallAgent)
 	mux.HandleFunc("GET /downloads/{filename}", s.handleAgentDownload)
 	mux.HandleFunc("POST /api/agent/enroll", s.handleAgentEnroll)
+	mux.HandleFunc("POST /api/agent/address", s.handleAgentAddress)
 	mux.HandleFunc("GET /api/agent/ws", s.handleAgentWS)
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/admin/summary", s.handleSummary)
@@ -372,23 +373,15 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("agent_id")
-	secret := bearerToken(r)
-	if len(id) < 8 || len(id) > 128 || len(secret) < 20 || len(secret) > 128 {
+	auth, err := s.authenticateAgentRequest(r)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "Agent 认证失败")
 		return
 	}
-	credentials, err := s.store.AgentCredentials(r.Context(), id)
-	presentedHash := hashToken(secret)
-	currentMatch := err == nil && subtle.ConstantTimeCompare([]byte(presentedHash), []byte(credentials.SecretHash)) == 1
-	pendingExpires, _ := time.Parse(time.RFC3339Nano, credentials.PendingSecretExpires)
-	pendingMatch := err == nil && credentials.PendingSecretHash != "" && pendingExpires.After(time.Now()) && subtle.ConstantTimeCompare([]byte(presentedHash), []byte(credentials.PendingSecretHash)) == 1
-	if err != nil || (!pendingMatch && (credentials.RevokedAt != "" || !currentMatch)) {
-		writeError(w, http.StatusUnauthorized, "Agent 认证失败")
-		return
-	}
-	if pendingMatch {
-		if err := s.store.PromoteCredential(r.Context(), id, presentedHash); err != nil {
+	id := auth.id
+	credentials := auth.credentials
+	if auth.pending {
+		if err := s.store.PromoteCredential(r.Context(), id, auth.presentedHash); err != nil {
 			writeError(w, http.StatusUnauthorized, "Agent 凭据轮换状态无效")
 			return
 		}
@@ -517,8 +510,51 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			_ = s.store.MarkControllerVerified(r.Context(), id, value.Fingerprint)
+		case protocol.TypeAddressReport:
+			var value protocol.AddressReport
+			if secureSession == nil || len(msg.Payload) > 1024 || json.Unmarshal(msg.Payload, &value) != nil || protocol.ValidateAddressReport(value) != nil {
+				_ = conn.Close(websocket.StatusPolicyViolation, "invalid address report")
+				return
+			}
+			_ = s.store.SetAgentPublicAddresses(r.Context(), id, value.IPv4, value.IPv6)
 		}
 	}
+}
+
+type agentAuthentication struct {
+	id            string
+	credentials   store.AgentCredentials
+	presentedHash string
+	pending       bool
+}
+
+func (s *Server) authenticateAgentRequest(r *http.Request) (agentAuthentication, error) {
+	id := r.URL.Query().Get("agent_id")
+	secret := bearerToken(r)
+	if len(id) < 8 || len(id) > 128 || len(secret) < 20 || len(secret) > 128 {
+		return agentAuthentication{}, errors.New("invalid Agent credentials")
+	}
+	credentials, err := s.store.AgentCredentials(r.Context(), id)
+	if err != nil {
+		return agentAuthentication{}, errors.New("invalid Agent credentials")
+	}
+	presentedHash := hashToken(secret)
+	currentMatch := subtle.ConstantTimeCompare([]byte(presentedHash), []byte(credentials.SecretHash)) == 1
+	pendingExpires, _ := time.Parse(time.RFC3339Nano, credentials.PendingSecretExpires)
+	pendingMatch := credentials.PendingSecretHash != "" && pendingExpires.After(time.Now()) && subtle.ConstantTimeCompare([]byte(presentedHash), []byte(credentials.PendingSecretHash)) == 1
+	if !pendingMatch && (credentials.RevokedAt != "" || !currentMatch) {
+		return agentAuthentication{}, errors.New("invalid Agent credentials")
+	}
+	return agentAuthentication{id: id, credentials: credentials, presentedHash: presentedHash, pending: pendingMatch}, nil
+}
+
+func (s *Server) handleAgentAddress(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := s.authenticateAgentRequest(r); err != nil {
+		writeError(w, http.StatusUnauthorized, "Agent 认证失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"address": s.clientIP(r)})
 }
 
 func (s *Server) handleRotateAgentCredential(w http.ResponseWriter, r *http.Request) {

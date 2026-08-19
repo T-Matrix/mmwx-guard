@@ -46,3 +46,26 @@ func TestValidateHelloRejectsMalformedControllerFingerprint(t *testing.T) {
 		t.Fatal("malformed controller fingerprint was accepted")
 	}
 }
+
+func TestValidateAddressReport(t *testing.T) {
+	for _, report := range []AddressReport{
+		{IPv4: "104.251.231.10"},
+		{IPv6: "2605:52c0:1:1313:8022:3ff:fe12:4fce"},
+		{IPv4: "104.251.231.10", IPv6: "2605:52c0:1:1313:8022:3ff:fe12:4fce"},
+	} {
+		if err := ValidateAddressReport(report); err != nil {
+			t.Fatalf("valid address report %#v rejected: %v", report, err)
+		}
+	}
+	for _, report := range []AddressReport{
+		{},
+		{IPv4: "127.0.0.1"},
+		{IPv4: "2605:52c0::1"},
+		{IPv6: "104.251.231.10"},
+		{IPv6: "fd00::1"},
+	} {
+		if err := ValidateAddressReport(report); err == nil {
+			t.Fatalf("invalid address report %#v accepted", report)
+		}
+	}
+}

@@ -1,12 +1,15 @@
 package controller
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/T-Matrix/mmwx-guard/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -154,5 +157,44 @@ func TestAgentMessageRate(t *testing.T) {
 	}
 	if !rate.allow(now.Add(time.Minute)) {
 		t.Fatal("Agent remained limited after the window")
+	}
+}
+
+func TestAgentAddressRequiresCredentialsAndEchoesClientAddress(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "guard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secret := "0123456789abcdef0123456789abcdef"
+	err = database.CreateAgent(t.Context(), store.NewAgent{
+		ID: "agent-address-test", Name: "address test", MachineID: "machine-1", SecretHash: hashToken(secret),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: database}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/agent/address?agent_id=agent-address-test", nil)
+	request.RemoteAddr = "104.251.231.10:54321"
+	request.Header.Set("Authorization", "Bearer "+secret)
+	response := httptest.NewRecorder()
+	server.handleAgentAddress(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("address response = %d, Cache-Control %q", response.Code, response.Header().Get("Cache-Control"))
+	}
+	var payload struct {
+		Address string `json:"address"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil || payload.Address != "104.251.231.10" {
+		t.Fatalf("address payload = %#v, %v", payload, err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/agent/address?agent_id=agent-address-test", nil)
+	request.Header.Set("Authorization", "Bearer wrong-secret-that-is-long-enough")
+	response = httptest.NewRecorder()
+	server.handleAgentAddress(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid credential response = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 }

@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,5 +100,35 @@ func TestAcceptCommandRejectsReplay(t *testing.T) {
 	}
 	if err := client.acceptCommand(message); err == nil {
 		t.Fatal("replayed command accepted")
+	}
+}
+
+func TestProbePublicAddressForcesIPv4AndAuthenticates(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/agent/address" || r.URL.Query().Get("agent_id") != "agent-address-test" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		if r.Header.Get("Authorization") != "Bearer "+secret {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil || net.ParseIP(host).To4() == nil {
+			t.Errorf("probe source = %q, want IPv4", r.RemoteAddr)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"address":"104.251.231.10"}`))
+	}))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	address, err := probePublicAddress(context.Background(), Config{ControllerURL: server.URL, AgentID: "agent-address-test", Secret: secret}, "tcp4")
+	if err != nil || address != "104.251.231.10" {
+		t.Fatalf("probePublicAddress() = %q, %v", address, err)
 	}
 }

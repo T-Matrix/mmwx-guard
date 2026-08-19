@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -329,10 +331,13 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 	readErr := make(chan error, 1)
 	go func() { readErr <- c.readLoop(ctx, conn, session) }()
+	c.probeAndReportAddresses(ctx, conn, session)
 	telemetryTicker := time.NewTicker(5 * time.Second)
 	ensureTicker := time.NewTicker(30 * time.Second)
+	addressTicker := time.NewTicker(30 * time.Minute)
 	defer telemetryTicker.Stop()
 	defer ensureTicker.Stop()
+	defer addressTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -349,8 +354,111 @@ func (c *Client) connect(ctx context.Context) error {
 			ensureCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			_ = c.firewall.Ensure(ensureCtx)
 			cancel()
+		case <-addressTicker.C:
+			c.probeAndReportAddresses(ctx, conn, session)
 		}
 	}
+}
+
+func (c *Client) probeAndReportAddresses(ctx context.Context, conn *websocket.Conn, session *protocol.SecureSession) {
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	report, err := probePublicAddresses(probeCtx, c.currentConfig())
+	if err != nil {
+		log.Printf("public address probe: %v", err)
+		return
+	}
+	msg, err := protocol.NewMessage(protocol.TypeAddressReport, "", report)
+	if err != nil {
+		return
+	}
+	if err := c.write(ctx, conn, session, msg); err != nil {
+		log.Printf("public address report: %v", err)
+	}
+}
+
+func probePublicAddresses(ctx context.Context, cfg Config) (protocol.AddressReport, error) {
+	type result struct {
+		family  string
+		address string
+		err     error
+	}
+	results := make(chan result, 2)
+	for _, family := range []string{"tcp4", "tcp6"} {
+		go func() {
+			address, err := probePublicAddress(ctx, cfg, family)
+			results <- result{family: family, address: address, err: err}
+		}()
+	}
+	report := protocol.AddressReport{}
+	errorsByFamily := make([]string, 0, 2)
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			errorsByFamily = append(errorsByFamily, result.family+": "+result.err.Error())
+			continue
+		}
+		if result.family == "tcp4" {
+			report.IPv4 = result.address
+		} else {
+			report.IPv6 = result.address
+		}
+	}
+	if report.IPv4 == "" && report.IPv6 == "" {
+		return report, errors.New(strings.Join(errorsByFamily, "; "))
+	}
+	return report, nil
+}
+
+func probePublicAddress(ctx context.Context, cfg Config, family string) (string, error) {
+	if family != "tcp4" && family != "tcp6" {
+		return "", errors.New("unsupported address family")
+	}
+	dialer := net.Dialer{Timeout: 6 * time.Second, KeepAlive: -1}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, family, address)
+		},
+		DisableKeepAlives: true,
+	}
+	defer transport.CloseIdleConnections()
+	requestURL := strings.TrimRight(cfg.ControllerURL, "/") + "/api/agent/address?agent_id=" + url.QueryEscape(cfg.AgentID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Secret)
+	resp, err := (&http.Client{Transport: transport}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var payload struct {
+		Address string `json:"address"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 4096))
+	if err := decoder.Decode(&payload); err != nil {
+		return "", err
+	}
+	address, err := netip.ParseAddr(strings.TrimSpace(payload.Address))
+	if err != nil {
+		return "", errors.New("controller returned an invalid address")
+	}
+	address = address.Unmap()
+	report := protocol.AddressReport{}
+	if family == "tcp4" {
+		report.IPv4 = address.String()
+	} else {
+		report.IPv6 = address.String()
+	}
+	if err := protocol.ValidateAddressReport(report); err != nil {
+		return "", err
+	}
+	return address.String(), nil
 }
 
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, session *protocol.SecureSession) error {

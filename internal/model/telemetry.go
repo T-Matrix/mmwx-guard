@@ -166,6 +166,9 @@ type AgentSummary struct {
 	Name                     string     `json:"name"`
 	Status                   string     `json:"status"`
 	IPAddress                string     `json:"ip_address"`
+	IPv4Address              string     `json:"ipv4_address,omitempty"`
+	IPv6Address              string     `json:"ipv6_address,omitempty"`
+	AddressUpdatedAt         string     `json:"address_updated_at,omitempty"`
 	OS                       string     `json:"os"`
 	Arch                     string     `json:"arch"`
 	Version                  string     `json:"version"`

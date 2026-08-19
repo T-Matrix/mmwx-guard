@@ -110,3 +110,14 @@ func TestSourceWeightSaturatesWithoutWrapping(t *testing.T) {
 		t.Fatalf("sourceWeight() accepted a negative connection count: %d", got)
 	}
 }
+
+func TestParseNftSetCountersUsesStructuredElements(t *testing.T) {
+	raw := []byte(`{"nftables":[{"metainfo":{"json_schema_version":1}},{"set":{"family":"inet","name":"temporary_bans_v4","table":"mmwx_guard","elem":[{"elem":{"val":"192.0.2.123","timeout":60,"counter":{"packets":7,"bytes":420}}},{"elem":{"val":"not-an-address","counter":{"packets":99,"bytes":99}}}]}}]}`)
+	counters := parseNftSetCounters(raw)
+	if len(counters) != 1 || counters["192.0.2.123"] != 7 {
+		t.Fatalf("parseNftSetCounters() = %#v", counters)
+	}
+	if counters := parseNftSetCounters([]byte(`elements = { 192.0.2.123 counter packets 7 bytes 420 }`)); len(counters) != 0 {
+		t.Fatalf("text output was unexpectedly parsed: %#v", counters)
+	}
+}

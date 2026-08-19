@@ -3,8 +3,10 @@ package telemetry
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
@@ -383,21 +385,18 @@ func nftStats(ctx context.Context) (bool, uint64) {
 	return true, total
 }
 
-var offenderPattern = regexp.MustCompile(`([0-9A-Fa-f:.]+).*?counter packets ([0-9]+) bytes`)
-
 func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 	if runtime.GOOS != "linux" {
 		return
 	}
 	drops := map[string]uint64{}
 	for _, setName := range []string{"offenders_v4", "offenders_v6", "manual_bans_v4", "manual_bans_v6", "temporary_bans_v4", "temporary_bans_v6"} {
-		out, err := exec.CommandContext(ctx, "nft", "list", "set", "inet", firewall.TableName, setName).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "nft", "-j", "list", "set", "inet", firewall.TableName, setName).CombinedOutput()
 		if err != nil {
 			continue
 		}
-		for _, match := range offenderPattern.FindAllStringSubmatch(string(out), -1) {
-			value, _ := strconv.ParseUint(match[2], 10, 64)
-			drops[match[1]] += value
+		for address, count := range parseNftSetCounters(out) {
+			drops[address] += count
 		}
 	}
 	indices := map[string]int{}
@@ -414,6 +413,37 @@ func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 	sort.Slice(*top, func(i, j int) bool {
 		return sourceWeight((*top)[i]) > sourceWeight((*top)[j])
 	})
+}
+
+func parseNftSetCounters(raw []byte) map[string]uint64 {
+	var document struct {
+		Nftables []struct {
+			Set struct {
+				Elements []struct {
+					Element struct {
+						Value   string `json:"val"`
+						Counter struct {
+							Packets uint64 `json:"packets"`
+						} `json:"counter"`
+					} `json:"elem"`
+				} `json:"elem"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if json.Unmarshal(raw, &document) != nil {
+		return nil
+	}
+	counters := make(map[string]uint64)
+	for _, object := range document.Nftables {
+		for _, item := range object.Set.Elements {
+			address, err := netip.ParseAddr(item.Element.Value)
+			if err != nil {
+				continue
+			}
+			counters[address.Unmap().String()] += item.Element.Counter.Packets
+		}
+	}
+	return counters
 }
 
 func sourceWeight(source model.SourceCount) uint64 {

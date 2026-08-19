@@ -40,6 +40,8 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "release/mmwx-guard-linux-${arch}" ./cmd/mmwx-guard
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "release/mmwx-guard-agent-linux-${arch}" ./cmd/mmwx-guard-agent
           done
+          test "$(release/mmwx-guard-linux-amd64 --version)" = "${VERSION}"
+          test "$(release/mmwx-guard-agent-linux-amd64 --version)" = "${VERSION}"
           cp scripts/install-controller.sh release/install-controller.sh
           chmod 0755 release/*
       - name: Generate checksums and manifest

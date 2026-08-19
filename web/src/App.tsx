@@ -719,7 +719,10 @@ function Updates({ currentVersion, agents, onRefresh }: { currentVersion: string
   }, [])
 
   useEffect(() => { void check() }, [check])
-  useEffect(() => { setSelected(candidates.map(agent => agent.id)) }, [currentVersion, candidateKey])
+  useEffect(() => {
+    const eligible = new Set(candidates.map(agent => agent.id))
+    setSelected(ids => ids.filter(id => eligible.has(id)))
+  }, [currentVersion, candidateKey])
 
   const updateController = async () => {
     if (!info?.latest_version) return
@@ -738,6 +741,7 @@ function Updates({ currentVersion, agents, onRefresh }: { currentVersion: string
     try {
       const data = await api<{ version: string; results: { agent_id: string; success: boolean; message: string }[] }>('/api/admin/update/agents', { method: 'POST', body: JSON.stringify({ agent_ids: selected }) })
       setResults(data.results || [])
+      setSelected([])
       window.setTimeout(() => { onRefresh(); void check() }, 8000)
     } catch (err) { setError((err as Error).message) }
     finally { setAgentBusy(false) }

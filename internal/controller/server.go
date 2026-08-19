@@ -60,6 +60,8 @@ func (s *Server) Handler() http.Handler {
 	admin.HandleFunc("GET /api/admin/agents", s.handleAgents)
 	admin.HandleFunc("PATCH /api/admin/agents/{id}", s.handleRenameAgent)
 	admin.HandleFunc("DELETE /api/admin/agents/{id}", s.handleDeleteAgent)
+	admin.HandleFunc("GET /api/admin/agents/{id}/protection", s.handleAgentProtection)
+	admin.HandleFunc("PUT /api/admin/agents/{id}/protection", s.handleSaveAgentProtection)
 	admin.HandleFunc("POST /api/admin/enrollments", s.handleCreateEnrollment)
 	admin.HandleFunc("GET /api/admin/policies", s.handlePolicies)
 	admin.HandleFunc("POST /api/admin/policies", s.handleSavePolicy)
@@ -341,6 +343,91 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.AddEvent(r.Context(), "warning", "agent_deleted", id, "删除 Agent 记录", nil)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAgentProtection(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	policy, err := s.store.AgentPolicy(r.Context(), agentID)
+	if err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"policy": policy})
+		return
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "读取服务器防护设置失败")
+		return
+	}
+	exists, existsErr := s.store.AgentExists(r.Context(), agentID)
+	if existsErr != nil {
+		writeError(w, http.StatusInternalServerError, "读取服务器失败")
+		return
+	}
+	if !exists {
+		writeError(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"policy": nil})
+}
+
+func (s *Server) handleSaveAgentProtection(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	if !s.hub.Online(agentID) {
+		writeError(w, http.StatusConflict, "服务器当前离线，无法验证并应用防护设置")
+		return
+	}
+	var policy model.Policy
+	if !decodeJSON(w, r, &policy) {
+		return
+	}
+	current, currentErr := s.store.AgentPolicy(r.Context(), agentID)
+	switch {
+	case currentErr == nil:
+		policy.ID = 0
+		policy.Revision = current.Revision + 1
+	case errors.Is(currentErr, store.ErrNotFound):
+		exists, err := s.store.AgentExists(r.Context(), agentID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取服务器失败")
+			return
+		}
+		if !exists {
+			writeError(w, http.StatusNotFound, "服务器不存在")
+			return
+		}
+		policy.ID = 0
+		policy.Revision = 1
+	default:
+		writeError(w, http.StatusInternalServerError, "读取服务器防护设置失败")
+		return
+	}
+	saved, err := s.store.SavePolicy(r.Context(), policy)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	result, err := s.hub.ApplyPolicy(ctx, agentID, saved)
+	cancel()
+	if err != nil {
+		_ = s.store.DeletePolicyIfUnassigned(r.Context(), saved.ID)
+		_ = s.store.AddEvent(r.Context(), "error", "policy_deploy", agentID, err.Error(), map[string]any{"policy_id": saved.ID, "revision": saved.Revision})
+		writeError(w, http.StatusBadGateway, "下发失败: "+err.Error())
+		return
+	}
+	if !result.Success {
+		_ = s.store.DeletePolicyIfUnassigned(r.Context(), saved.ID)
+		_ = s.store.AddEvent(r.Context(), "error", "policy_deploy", agentID, result.Message, map[string]any{"policy_id": saved.ID, "revision": saved.Revision})
+		writeError(w, http.StatusBadRequest, "应用失败: "+result.Message)
+		return
+	}
+	if err := s.store.AssignPolicy(r.Context(), agentID, saved.ID, saved.Revision); err != nil {
+		writeError(w, http.StatusInternalServerError, "防护已应用，但保存服务器归属失败")
+		return
+	}
+	if currentErr == nil {
+		_ = s.store.DeletePolicyIfUnassigned(r.Context(), current.ID)
+	}
+	_ = s.store.AddEvent(r.Context(), "info", "policy_deploy", agentID, "服务器防护设置已保存并应用", map[string]any{"policy_id": saved.ID, "revision": saved.Revision})
+	writeJSON(w, http.StatusOK, map[string]any{"policy": saved, "message": result.Message})
 }
 
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {

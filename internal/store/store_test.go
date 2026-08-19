@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -55,5 +56,39 @@ func TestSummarySeparatesEstablishedAndTimeWait(t *testing.T) {
 	}
 	if summary["sockets"] != 200 || summary["established"] != 65 || summary["time_wait"] != 115 {
 		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestDeletePolicyIfUnassigned(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	ctx := context.Background()
+	if err := storage.CreateAgent(ctx, NewAgent{ID: "agent-1", Name: "first", MachineID: "machine-1", SecretHash: "hash-1"}); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := storage.SavePolicy(ctx, model.DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.AssignPolicy(ctx, "agent-1", policy.ID, policy.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DeletePolicyIfUnassigned(ctx, policy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.GetPolicy(ctx, policy.ID); err != nil {
+		t.Fatalf("assigned policy was deleted: %v", err)
+	}
+	if err := storage.DeleteAgent(ctx, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DeletePolicyIfUnassigned(ctx, policy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.GetPolicy(ctx, policy.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unassigned policy still exists: %v", err)
 	}
 }

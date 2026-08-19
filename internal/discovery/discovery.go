@@ -20,23 +20,30 @@ import (
 
 type Options struct {
 	MMWConfigPath      string
+	MMWXrayConfigPath  string
 	ForwardXConfigPath string
 	ForwardXRulesDir   string
 	ServiceActive      func(context.Context, string) bool
+	ListenerActive     func(context.Context, string, uint16) bool
 }
 
 func DefaultOptions() Options {
 	return Options{
 		MMWConfigPath:      "/etc/mmw-agent/config.yaml",
+		MMWXrayConfigPath:  "/usr/local/etc/xray/config.json",
 		ForwardXConfigPath: "/etc/forwardx/agent/config.json",
 		ForwardXRulesDir:   "/etc/forwardx/realm",
 		ServiceActive:      serviceActive,
+		ListenerActive:     listenerActive,
 	}
 }
 
 func Discover(ctx context.Context, options Options) model.Integrations {
 	if options.ServiceActive == nil {
 		options.ServiceActive = serviceActive
+	}
+	if options.ListenerActive == nil {
+		options.ListenerActive = listenerActive
 	}
 	return model.Integrations{
 		MMW:      discoverMMW(ctx, options),
@@ -62,6 +69,88 @@ func discoverMMW(ctx context.Context, options Options) *model.MMWIntegration {
 		MasterURL:      strings.TrimRight(strings.TrimSpace(config.MasterURL), "/"),
 		ConnectionMode: strings.TrimSpace(config.ConnectionMode),
 		XrayMode:       strings.TrimSpace(config.XrayMode),
+		Nodes:          discoverMMWNodes(ctx, options),
+	}
+}
+
+func discoverMMWNodes(ctx context.Context, options Options) []model.MMWNodeListener {
+	raw, err := os.ReadFile(options.MMWXrayConfigPath)
+	if err != nil {
+		return []model.MMWNodeListener{}
+	}
+	var config struct {
+		Inbounds []struct {
+			Tag            string `json:"tag"`
+			Listen         string `json:"listen"`
+			Port           uint16 `json:"port"`
+			Protocol       string `json:"protocol"`
+			StreamSettings struct {
+				Network  string `json:"network"`
+				Security string `json:"security"`
+			} `json:"streamSettings"`
+		} `json:"inbounds"`
+	}
+	if json.Unmarshal(raw, &config) != nil {
+		return []model.MMWNodeListener{}
+	}
+	nodes := make([]model.MMWNodeListener, 0, len(config.Inbounds))
+	for _, inbound := range config.Inbounds {
+		if inbound.Port == 0 || internalInbound(inbound.Tag) || loopbackOnly(inbound.Listen) {
+			continue
+		}
+		protocol := strings.ToLower(strings.TrimSpace(inbound.Protocol))
+		if protocol == "" {
+			continue
+		}
+		network := strings.ToLower(strings.TrimSpace(inbound.StreamSettings.Network))
+		if network == "" {
+			network = "tcp"
+		}
+		listen := strings.TrimSpace(inbound.Listen)
+		if listen == "" {
+			listen = "0.0.0.0"
+		}
+		nodes = append(nodes, model.MMWNodeListener{
+			Tag: strings.TrimSpace(inbound.Tag), Listen: listen, Port: inbound.Port,
+			Protocol: protocol, Network: network,
+			Security: strings.ToLower(strings.TrimSpace(inbound.StreamSettings.Security)),
+			Active:   options.ListenerActive(ctx, listenerNetwork(network), inbound.Port),
+		})
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].Port == nodes[j].Port {
+			return nodes[i].Tag < nodes[j].Tag
+		}
+		return nodes[i].Port < nodes[j].Port
+	})
+	return nodes
+}
+
+func internalInbound(tag string) bool {
+	value := strings.ToLower(strings.TrimSpace(tag))
+	for _, marker := range []string{"api", "tunnel"} {
+		if value == marker || strings.HasPrefix(value, marker+"-") || strings.HasSuffix(value, "-"+marker) || strings.Contains(value, "-"+marker+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+func loopbackOnly(listen string) bool {
+	value := strings.Trim(strings.TrimSpace(listen), "[]")
+	if strings.EqualFold(value, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(value)
+	return ip != nil && ip.IsLoopback()
+}
+
+func listenerNetwork(network string) string {
+	switch strings.ToLower(network) {
+	case "kcp", "mkcp", "quic":
+		return "udp"
+	default:
+		return "tcp"
 	}
 }
 
@@ -163,4 +252,15 @@ func serviceActive(ctx context.Context, unit string) bool {
 	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	return exec.CommandContext(checkCtx, "systemctl", "is-active", "--quiet", unit).Run() == nil
+}
+
+func listenerActive(ctx context.Context, network string, port uint16) bool {
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	flag := "-ltnH"
+	if network == "udp" {
+		flag = "-lunH"
+	}
+	out, err := exec.CommandContext(checkCtx, "ss", flag, "sport", "=", ":"+strconv.Itoa(int(port))).Output()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
 }

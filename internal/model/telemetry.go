@@ -15,10 +15,21 @@ type SocketStats struct {
 }
 
 type MMWIntegration struct {
-	Active         bool   `json:"active"`
-	MasterURL      string `json:"master_url,omitempty"`
-	ConnectionMode string `json:"connection_mode,omitempty"`
-	XrayMode       string `json:"xray_mode,omitempty"`
+	Active         bool              `json:"active"`
+	MasterURL      string            `json:"master_url,omitempty"`
+	ConnectionMode string            `json:"connection_mode,omitempty"`
+	XrayMode       string            `json:"xray_mode,omitempty"`
+	Nodes          []MMWNodeListener `json:"nodes"`
+}
+
+type MMWNodeListener struct {
+	Tag      string `json:"tag,omitempty"`
+	Listen   string `json:"listen,omitempty"`
+	Port     uint16 `json:"port"`
+	Protocol string `json:"protocol"`
+	Network  string `json:"network,omitempty"`
+	Security string `json:"security,omitempty"`
+	Active   bool   `json:"active"`
 }
 
 type ForwardRule struct {

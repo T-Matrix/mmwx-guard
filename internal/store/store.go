@@ -336,6 +336,17 @@ func (s *Store) AgentPolicy(ctx context.Context, agentID string) (model.Policy, 
 	return s.GetPolicy(ctx, policyID.Int64)
 }
 
+func (s *Store) AgentExists(ctx context.Context, agentID string) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agents WHERE id=?)`, agentID).Scan(&exists)
+	return exists == 1, err
+}
+
+func (s *Store) DeletePolicyIfUnassigned(ctx context.Context, policyID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM policies WHERE id=? AND NOT EXISTS(SELECT 1 FROM agents WHERE policy_id=?)`, policyID, policyID)
+	return err
+}
+
 func (s *Store) DeleteAgent(ctx context.Context, agentID string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM agents WHERE id=?`, agentID)
 	if err != nil {

@@ -8,8 +8,9 @@ export type Status = {
 
 export type SourceCount = { ip: string; connections: number; dropped?: number }
 export type ForwardRule = { id: string; protocol: string; listen: string; listen_port: number; remote: string; active: boolean }
+export type MMWNode = { tag?: string; listen?: string; port: number; protocol: string; network?: string; security?: string; active: boolean }
 export type Integrations = {
-  mmw?: { active: boolean; master_url?: string; connection_mode?: string; xray_mode?: string }
+  mmw?: { active: boolean; master_url?: string; connection_mode?: string; xray_mode?: string; nodes: MMWNode[] }
   forwardx?: { active: boolean; panel_url?: string; rules: ForwardRule[] }
 }
 export type Telemetry = {

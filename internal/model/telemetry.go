@@ -16,6 +16,7 @@ type SocketStats struct {
 
 type Telemetry struct {
 	CollectedAt    string        `json:"collected_at"`
+	CPUUsage       float64       `json:"cpu_usage"`
 	Load1          float64       `json:"load_1"`
 	Load5          float64       `json:"load_5"`
 	MemoryUsed     uint64        `json:"memory_used"`

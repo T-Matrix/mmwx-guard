@@ -347,6 +347,17 @@ func (s *Store) DeleteAgent(ctx context.Context, agentID string) error {
 	return nil
 }
 
+func (s *Store) RenameAgent(ctx context.Context, agentID, name string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE agents SET name=? WHERE id=?`, name, agentID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 type Event struct {
 	ID        int64           `json:"id"`
 	Level     string          `json:"level"`

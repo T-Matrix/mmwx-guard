@@ -9,6 +9,7 @@ export type Status = {
 export type SourceCount = { ip: string; connections: number; dropped?: number }
 export type Telemetry = {
   collected_at: string
+  cpu_usage?: number
   load_1: number
   load_5: number
   memory_used: number

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -57,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/admin/summary", s.handleSummary)
 	admin.HandleFunc("GET /api/admin/agents", s.handleAgents)
+	admin.HandleFunc("PATCH /api/admin/agents/{id}", s.handleRenameAgent)
 	admin.HandleFunc("DELETE /api/admin/agents/{id}", s.handleDeleteAgent)
 	admin.HandleFunc("POST /api/admin/enrollments", s.handleCreateEnrollment)
 	admin.HandleFunc("GET /api/admin/policies", s.handlePolicies)
@@ -300,6 +302,31 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+func (s *Server) handleRenameAgent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if count := utf8.RuneCountInString(req.Name); count < 1 || count > 80 {
+		writeError(w, http.StatusBadRequest, "服务器名称长度应为 1 到 80 个字符")
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.store.RenameAgent(r.Context(), id, req.Name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "服务器不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "修改服务器名称失败")
+		}
+		return
+	}
+	_ = s.store.AddEvent(r.Context(), "info", "agent_renamed", id, "服务器已重命名: "+req.Name, nil)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": req.Name})
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {

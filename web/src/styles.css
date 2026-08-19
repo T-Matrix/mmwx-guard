@@ -227,6 +227,10 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
 td > strong, td > small { display: block; }
 td > small { color: var(--muted); margin-top: 3px; }
+.resource-cell { min-width: 126px; white-space: nowrap; }
+.agent-table th, .agent-table td { padding-inline: 10px; }
+.agent-table th:last-child, .agent-table td:last-child { position: sticky; right: 0; z-index: 2; background: var(--surface); box-shadow: -2px 0 0 var(--line-soft); }
+.agent-table th:last-child { z-index: 3; background: var(--surface-2); }
 .status { min-width: 66px; display: inline-flex; align-items: center; gap: 7px; font-weight: 800; color: var(--muted); white-space: nowrap; }
 .status i { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .status.online { color: var(--green); }
@@ -382,6 +386,7 @@ input:hover, textarea:hover, input:focus, textarea:focus { border-color: var(--a
   .source-bar { display: none; }
   .section-toolbar { align-items: stretch; flex-direction: column; }
   .section-toolbar > button { width: 100%; }
+  .agent-table th:last-child, .agent-table td:last-child { position: static; box-shadow: none; }
   .form-grid, .five-cols { grid-template-columns: 1fr; }
   .modal-backdrop { padding: 10px; }
   .modal { max-height: calc(100vh - 20px); }

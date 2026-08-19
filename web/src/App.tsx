@@ -2,7 +2,7 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 
 import {
   Activity, AlertTriangle, Check, ChevronDown, CircleGauge, Clipboard, Copy,
   Cpu, Download, ExternalLink, FileClock, Filter, ListFilter, LogOut, Moon,
-  Network, PackageCheck, Plus, RefreshCw, Server, ShieldCheck, ShieldX, Sun,
+  Network, PackageCheck, Pencil, Plus, RefreshCw, Server, ShieldCheck, ShieldX, Sun,
   Trash2, X, Zap,
 } from 'lucide-react'
 import { api } from './api'
@@ -25,6 +25,7 @@ function App() {
   const [enrollOpen, setEnrollOpen] = useState(false)
   const [policyOpen, setPolicyOpen] = useState(false)
   const [deployPolicy, setDeployPolicy] = useState<Policy | null>(null)
+  const [renameAgent, setRenameAgent] = useState<Agent | null>(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('mmwx-guard-theme') || 'pixel')
 
   useEffect(() => {
@@ -87,12 +88,13 @@ function App() {
       <main className="content">
         {error && <div className="alert-strip"><AlertTriangle size={18} />{error}<button onClick={() => setError('')} aria-label="关闭"><X size={16} /></button></div>}
         {tab === 'overview' && <Overview summary={summary} agents={agents} events={events} />}
-        {tab === 'agents' && <Agents agents={agents} policies={policies} onEnroll={() => setEnrollOpen(true)} onDeploy={setDeployPolicy} onDelete={async id => { await api(`/api/admin/agents/${id}`, { method: 'DELETE' }); void refresh() }} />}
+        {tab === 'agents' && <Agents agents={agents} policies={policies} onEnroll={() => setEnrollOpen(true)} onDeploy={setDeployPolicy} onRename={setRenameAgent} onDelete={async id => { await api(`/api/admin/agents/${id}`, { method: 'DELETE' }); void refresh() }} />}
         {tab === 'policies' && <Policies policies={policies} agents={agents} onCreate={() => setPolicyOpen(true)} onDeploy={setDeployPolicy} />}
         {tab === 'events' && <Events events={events} agents={agents} />}
         {tab === 'updates' && <Updates currentVersion={status.version} agents={agents} onRefresh={() => void refresh(true)} />}
       </main>
       {enrollOpen && <EnrollmentDialog onClose={() => setEnrollOpen(false)} />}
+      {renameAgent && <RenameAgentDialog agent={renameAgent} onClose={() => setRenameAgent(null)} onSaved={() => { setRenameAgent(null); void refresh() }} />}
       {policyOpen && <PolicyDialog onClose={() => setPolicyOpen(false)} onSaved={() => { setPolicyOpen(false); void refresh() }} />}
       {deployPolicy && <DeployDialog policy={deployPolicy} agents={agents} onClose={() => setDeployPolicy(null)} onDone={() => { setDeployPolicy(null); void refresh() }} />}
     </div>
@@ -171,12 +173,12 @@ function Overview({ summary, agents, events }: { summary: Summary; agents: Agent
   </>
 }
 
-function Agents({ agents, policies, onEnroll, onDeploy, onDelete }: { agents: Agent[]; policies: Policy[]; onEnroll: () => void; onDeploy: (p: Policy) => void; onDelete: (id: string) => Promise<void> }) {
+function Agents({ agents, policies, onEnroll, onDeploy, onRename, onDelete }: { agents: Agent[]; policies: Policy[]; onEnroll: () => void; onDeploy: (p: Policy) => void; onRename: (agent: Agent) => void; onDelete: (id: string) => Promise<void> }) {
   return <section className="panel management-panel">
     <div className="section-toolbar"><div><h2>服务器列表 ({agents.length})</h2><p>Agent 使用主动连接，不需要向公网开放管理端口</p></div><button className="primary-button" onClick={onEnroll}><Plus size={18} />添加服务器</button></div>
-    <div className="table-wrap"><table><thead><tr><th>名称</th><th>连接状态</th><th>公网 IP</th><th>Socket</th><th>SYN 堆积</th><th>Conntrack</th><th>防护策略</th><th>操作</th></tr></thead><tbody>
-      {agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{formatNumber(agent.telemetry?.sockets.total || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name || <span className="muted">未下发</span>}</td><td><div className="row-actions">{policies[0] && <button title="下发策略" onClick={() => onDeploy(policies[0])}><ShieldCheck size={18} /></button>}<button title="删除" className="danger" onClick={() => void onDelete(agent.id)}><Trash2 size={18} /></button></div></td></tr>)}
-      {agents.length === 0 && <tr><td colSpan={8}><Empty text="点击“添加服务器”生成一次性安装命令" /></td></tr>}
+    <div className="table-wrap"><table className="agent-table"><thead><tr><th>名称</th><th>连接状态</th><th>公网 IP</th><th>CPU</th><th>内存</th><th>Socket</th><th>SYN 堆积</th><th>Conntrack</th><th>防护策略</th><th>操作</th></tr></thead><tbody>
+      {agents.map(agent => <tr key={agent.id}><td><strong>{agent.name}</strong><small>Agent {agent.version || '-'}</small></td><td><Status status={agent.status} protected={agent.telemetry?.protected} /></td><td className="mono">{agent.ip_address || '-'}</td><td>{agent.telemetry?.cpu_usage == null ? '-' : `${agent.telemetry.cpu_usage.toFixed(1)}%`}</td><td className="resource-cell"><strong>{agent.telemetry ? percentage(agent.telemetry.memory_used, agent.telemetry.memory_total) : '-'}</strong><small>{agent.telemetry ? `${formatMemory(agent.telemetry.memory_used)} / ${formatMemory(agent.telemetry.memory_total)}` : '-'}</small></td><td>{formatNumber(agent.telemetry?.sockets.total || 0)}</td><td>{(agent.telemetry?.sockets.syn_recv || 0) + (agent.telemetry?.sockets.syn_sent || 0)}</td><td>{formatNumber(agent.telemetry?.conntrack || 0)}</td><td>{agent.policy_name || <span className="muted">未下发</span>}</td><td><div className="row-actions">{policies[0] && <button title="下发策略" onClick={() => onDeploy(policies[0])}><ShieldCheck size={18} /></button>}<button title="修改名称" onClick={() => onRename(agent)}><Pencil size={18} /></button><button title="删除" className="danger" onClick={() => void onDelete(agent.id)}><Trash2 size={18} /></button></div></td></tr>)}
+      {agents.length === 0 && <tr><td colSpan={10}><Empty text="点击“添加服务器”生成一次性安装命令" /></td></tr>}
     </tbody></table></div>
   </section>
 }
@@ -286,6 +288,26 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
   </Modal>
 }
 
+function RenameAgentDialog({ agent, onClose, onSaved }: { agent: Agent; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(agent.name)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setBusy(true); setError('')
+    try {
+      await api(`/api/admin/agents/${encodeURIComponent(agent.id)}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+      onSaved()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <Modal title="修改服务器名称" subtitle={agent.ip_address || agent.id} onClose={onClose}>
+    <form onSubmit={submit} className="form-grid">{error && <div className="form-error full">{error}</div>}<label className="full"><span>服务器名称</span><input autoFocus maxLength={80} value={name} onChange={e => setName(e.target.value)} required /></label><div className="dialog-actions"><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy || !name.trim()}>{busy ? '保存中...' : '保存名称'}</button></div></form>
+  </Modal>
+}
+
 function PolicyDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState('弹性连接防护')
   const [ports, setPorts] = useState<PortRule[]>([{ port: 15542, per_ip_rate: 100, per_ip_burst: 500, aggregate_rate: 300, aggregate_burst: 1500, enabled: true }])
@@ -350,6 +372,7 @@ function aggregateSources(agents: Agent[]): SourceCount[] {
 }
 function formatNumber(value: number) { return new Intl.NumberFormat('zh-CN', { notation: value >= 100000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value) }
 function percentage(used: number, total: number) { return total ? `${Math.round(used / total * 100)}%` : '-' }
+function formatMemory(bytes: number) { if (!bytes) return '-'; const gibibytes = bytes / 1024 ** 3; return gibibytes >= 1 ? `${gibibytes.toFixed(gibibytes >= 10 ? 0 : 1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB` }
 function formatTime(value: string) { if (!value) return '-'; return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
 function relativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return `${seconds}秒前`; if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`; return `${Math.floor(seconds / 86400)}天前` }
 

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/T-Matrix/mmwx-guard/internal/firewall"
@@ -20,6 +21,9 @@ import (
 
 type Collector struct {
 	firewall *firewall.Manager
+	cpuMu    sync.Mutex
+	lastCPU  cpuSample
+	hasCPU   bool
 }
 
 func NewCollector(manager *firewall.Manager) *Collector {
@@ -28,6 +32,7 @@ func NewCollector(manager *firewall.Manager) *Collector {
 
 func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 	t := model.Telemetry{CollectedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	t.CPUUsage = c.cpuUsage()
 	t.Load1, t.Load5 = loadAverage()
 	t.MemoryUsed, t.MemoryTotal = memoryUsage()
 	t.Conntrack = readUint("/proc/sys/net/netfilter/nf_conntrack_count")
@@ -42,6 +47,74 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 		t.TopSources = t.TopSources[:20]
 	}
 	return t
+}
+
+type cpuSample struct {
+	idle  uint64
+	total uint64
+}
+
+func (c *Collector) cpuUsage() float64 {
+	raw, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	current, ok := parseCPUSample(string(raw))
+	if !ok {
+		return 0
+	}
+
+	c.cpuMu.Lock()
+	defer c.cpuMu.Unlock()
+	previous, hasPrevious := c.lastCPU, c.hasCPU
+	c.lastCPU, c.hasCPU = current, true
+	if !hasPrevious {
+		return 0
+	}
+	return cpuUsageBetween(previous, current)
+}
+
+func cpuUsageBetween(previous, current cpuSample) float64 {
+	if current.total <= previous.total || current.idle < previous.idle {
+		return 0
+	}
+	totalDelta := current.total - previous.total
+	idleDelta := current.idle - previous.idle
+	if idleDelta >= totalDelta {
+		return 0
+	}
+	return float64(totalDelta-idleDelta) * 100 / float64(totalDelta)
+}
+
+func parseCPUSample(raw string) (cpuSample, bool) {
+	line, _, _ := strings.Cut(raw, "\n")
+	fields := strings.Fields(line)
+	if len(fields) < 5 || fields[0] != "cpu" {
+		return cpuSample{}, false
+	}
+	values := make([]uint64, 0, 8)
+	for _, field := range fields[1:] {
+		value, err := strconv.ParseUint(field, 10, 64)
+		if err != nil {
+			return cpuSample{}, false
+		}
+		values = append(values, value)
+		if len(values) == 8 {
+			break
+		}
+	}
+	if len(values) < 4 {
+		return cpuSample{}, false
+	}
+	var total uint64
+	for _, value := range values {
+		total += value
+	}
+	idle := values[3]
+	if len(values) > 4 {
+		idle += values[4]
+	}
+	return cpuSample{idle: idle, total: total}, total > 0
 }
 
 func loadAverage() (float64, float64) {

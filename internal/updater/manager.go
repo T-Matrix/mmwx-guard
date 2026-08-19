@@ -97,8 +97,11 @@ func (m *Manager) RequestUpdate(ctx context.Context, version string) (Status, er
 	if !IsNewer(version, m.CurrentVersion) {
 		return Status{}, fmt.Errorf("version %s is not newer than %s", version, m.CurrentVersion)
 	}
-	if err := os.MkdirAll(m.UpdateDir, 0770); err != nil {
+	if err := os.MkdirAll(m.UpdateDir, 0700); err != nil {
 		return Status{}, fmt.Errorf("create update directory: %w", err)
+	}
+	if err := os.Chmod(m.UpdateDir, 0700); err != nil {
+		return Status{}, fmt.Errorf("secure update directory: %w", err)
 	}
 	request := Request{
 		Version:      version,
@@ -106,11 +109,11 @@ func (m *Manager) RequestUpdate(ctx context.Context, version string) (Status, er
 		RequestedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		CurrentBuild: m.CurrentVersion,
 	}
-	if err := writeJSONAtomic(filepath.Join(m.UpdateDir, requestFilename), request, 0660); err != nil {
+	if err := writeJSONAtomic(filepath.Join(m.UpdateDir, requestFilename), request, 0600); err != nil {
 		return Status{}, err
 	}
 	status := Status{State: "queued", Version: version, Message: "更新请求已提交，系统将自动重启", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	if err := writeJSONAtomic(filepath.Join(m.UpdateDir, statusFilename), status, 0660); err != nil {
+	if err := writeJSONAtomic(filepath.Join(m.UpdateDir, statusFilename), status, 0600); err != nil {
 		return Status{}, err
 	}
 	return status, nil

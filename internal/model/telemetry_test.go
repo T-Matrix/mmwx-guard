@@ -38,6 +38,8 @@ func TestTelemetryValidate(t *testing.T) {
 			}
 		}},
 		{"stale collection", func(value *Telemetry) { value.CollectedAt = now.Add(-6 * time.Minute).Format(time.RFC3339Nano) }},
+		{"oversized adaptive reason", func(value *Telemetry) { value.Adaptive.Reason = string(make([]byte, 257)) }},
+		{"invalid adaptive timestamp", func(value *Telemetry) { value.Adaptive.Since = "not-a-time" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -56,5 +58,18 @@ func TestTelemetryValidateRejectsOversizedIntegrations(t *testing.T) {
 	value.Integrations.MMW = &MMWIntegration{Nodes: make([]MMWNodeListener, MaxMMWNodes+1)}
 	if err := value.Validate(now); err == nil {
 		t.Fatal("oversized integration accepted")
+	}
+}
+
+func TestTelemetryValidateRejectsInvalidPortHealth(t *testing.T) {
+	now := time.Now()
+	value := validTelemetry(now)
+	value.PortHealth = []PortHealth{{Key: "mmw:test:443", Kind: "mmw", Port: 443, Status: "healthy", LatencyMS: 2, CheckedAt: now.Format(time.RFC3339Nano)}}
+	if err := value.Validate(now); err != nil {
+		t.Fatalf("valid port health rejected: %v", err)
+	}
+	value.PortHealth = append(value.PortHealth, value.PortHealth[0])
+	if err := value.Validate(now); err == nil {
+		t.Fatal("duplicate port health key accepted")
 	}
 }

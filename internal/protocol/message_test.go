@@ -3,6 +3,8 @@ package protocol
 import (
 	"testing"
 	"time"
+
+	"github.com/T-Matrix/mmwx-guard/internal/model"
 )
 
 func TestValidateCommandFreshness(t *testing.T) {
@@ -66,6 +68,23 @@ func TestValidateAddressReport(t *testing.T) {
 	} {
 		if err := ValidateAddressReport(report); err == nil {
 			t.Fatalf("invalid address report %#v accepted", report)
+		}
+	}
+}
+
+func TestValidateSyncBans(t *testing.T) {
+	now := time.Now()
+	valid := SyncBans{Bans: []model.BanTarget{{Address: "203.0.113.8"}, {Address: "2001:db8::8", ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano)}}}
+	if err := ValidateSyncBans(valid, now); err != nil {
+		t.Fatalf("valid bans rejected: %v", err)
+	}
+	for _, value := range []SyncBans{
+		{Bans: []model.BanTarget{{Address: "127.0.0.1"}}},
+		{Bans: []model.BanTarget{{Address: "203.0.113.8"}, {Address: "203.0.113.8"}}},
+		{Bans: []model.BanTarget{{Address: "203.0.113.8", ExpiresAt: now.Add(-time.Minute).Format(time.RFC3339Nano)}}},
+	} {
+		if err := ValidateSyncBans(value, now); err == nil {
+			t.Fatalf("invalid bans accepted: %#v", value)
 		}
 	}
 }

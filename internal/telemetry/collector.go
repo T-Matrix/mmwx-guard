@@ -31,6 +31,9 @@ type Collector struct {
 	discoveryMu  sync.Mutex
 	integrations model.Integrations
 	discoveredAt time.Time
+	healthMu     sync.Mutex
+	portHealth   []model.PortHealth
+	healthAt     time.Time
 }
 
 func NewCollector(manager *firewall.Manager) *Collector {
@@ -49,6 +52,7 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 	t.Sockets, t.TopSources = socketStats(ctx)
 	t.Protected, t.DroppedTotal = nftStats(ctx)
 	t.Integrations = c.integrationStats(ctx)
+	t.PortHealth = c.portHealthStats(ctx, t.Integrations)
 	if policy, err := c.firewall.CurrentPolicy(); err == nil {
 		t.PolicyRevision = policy.Revision
 	}
@@ -57,6 +61,19 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 		t.TopSources = t.TopSources[:model.MaxTopSources]
 	}
 	return t
+}
+
+func (c *Collector) portHealthStats(ctx context.Context, integrations model.Integrations) []model.PortHealth {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+	if !c.healthAt.IsZero() && time.Since(c.healthAt) < 30*time.Second {
+		return append([]model.PortHealth(nil), c.portHealth...)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	c.portHealth = probePortHealth(probeCtx, integrations)
+	c.healthAt = time.Now()
+	return append([]model.PortHealth(nil), c.portHealth...)
 }
 
 func (c *Collector) integrationStats(ctx context.Context) model.Integrations {
@@ -354,7 +371,7 @@ func nftStats(ctx context.Context) (bool, uint64) {
 	if runtime.GOOS != "linux" {
 		return false, 0
 	}
-	out, err := exec.CommandContext(ctx, "nft", "list", "chain", "inet", firewall.TableName, "prerouting").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "nft", "list", "table", "inet", firewall.TableName).CombinedOutput()
 	if err != nil {
 		return false, 0
 	}
@@ -373,7 +390,7 @@ func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 		return
 	}
 	drops := map[string]uint64{}
-	for _, setName := range []string{"offenders_v4", "offenders_v6"} {
+	for _, setName := range []string{"offenders_v4", "offenders_v6", "manual_bans_v4", "manual_bans_v6", "temporary_bans_v4", "temporary_bans_v6"} {
 		out, err := exec.CommandContext(ctx, "nft", "list", "set", "inet", firewall.TableName, setName).CombinedOutput()
 		if err != nil {
 			continue
@@ -395,10 +412,19 @@ func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 		}
 	}
 	sort.Slice(*top, func(i, j int) bool {
-		left := uint64((*top)[i].Connections) + (*top)[i].Dropped
-		right := uint64((*top)[j].Connections) + (*top)[j].Dropped
-		return left > right
+		return sourceWeight((*top)[i]) > sourceWeight((*top)[j])
 	})
+}
+
+func sourceWeight(source model.SourceCount) uint64 {
+	if source.Connections <= 0 {
+		return source.Dropped
+	}
+	connections := uint64(source.Connections) // #nosec G115 -- negative values are rejected above and int always fits uint64.
+	if ^uint64(0)-source.Dropped < connections {
+		return ^uint64(0)
+	}
+	return source.Dropped + connections
 }
 
 func MachineID() string {

@@ -333,3 +333,245 @@ func TestDeletePolicyIfUnassigned(t *testing.T) {
 		t.Fatalf("unassigned policy still exists: %v", err)
 	}
 }
+
+func TestIPBanLifecycleAndExpiry(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	ctx := context.Background()
+	if err := storage.CreateAgent(ctx, NewAgent{ID: "agent-1", Name: "first", MachineID: "machine-1", SecretHash: "hash-1"}); err != nil {
+		t.Fatal(err)
+	}
+	permanent, err := storage.SaveIPBan(ctx, "agent-1", "203.0.113.8", "abuse", time.Time{})
+	if err != nil || permanent.ID == 0 || permanent.ExpiresAt != "" || permanent.Applied {
+		t.Fatalf("permanent ban = %#v, %v", permanent, err)
+	}
+	temporary, err := storage.SaveIPBan(ctx, "agent-1", "2001:db8::8", "burst", time.Now().Add(time.Hour))
+	if err != nil || temporary.ExpiresAt == "" {
+		t.Fatalf("temporary ban = %#v, %v", temporary, err)
+	}
+	if err := storage.SetIPBansApplyState(ctx, "agent-1", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	bans, err := storage.ListIPBans(ctx, "agent-1")
+	if err != nil || len(bans) != 2 || !bans[0].Applied || !bans[1].Applied {
+		t.Fatalf("bans = %#v, %v", bans, err)
+	}
+	updated, err := storage.SaveIPBan(ctx, "agent-1", "203.0.113.8", "extended", time.Now().Add(2*time.Hour))
+	if err != nil || updated.ID != permanent.ID || updated.Reason != "extended" || updated.Applied {
+		t.Fatalf("updated ban = %#v, %v", updated, err)
+	}
+	if err := storage.DeleteIPBan(ctx, "agent-1", temporary.ID); err != nil {
+		t.Fatal(err)
+	}
+	if bans, err = storage.ListIPBans(ctx, "agent-1"); err != nil || len(bans) != 1 {
+		t.Fatalf("bans after delete = %#v, %v", bans, err)
+	}
+	if err := storage.DeleteAgent(ctx, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
+	if bans, err = storage.ListIPBans(ctx, "agent-1"); err != nil || len(bans) != 0 {
+		t.Fatalf("bans survived Agent deletion = %#v, %v", bans, err)
+	}
+}
+
+func TestPolicyHistoryIsImmutableAndRetainedPerAgent(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	ctx := context.Background()
+	if err := storage.CreateAgent(ctx, NewAgent{ID: "agent-1", Name: "first", MachineID: "machine-1", SecretHash: "hash-1"}); err != nil {
+		t.Fatal(err)
+	}
+	for revision := int64(1); revision <= 101; revision++ {
+		policy := model.DefaultPolicy()
+		policy.Revision = revision
+		policy.Global.Rate = 800 + int(revision)
+		if _, err := storage.RecordPolicyHistory(ctx, "agent-1", "saved", "admin", "saved", policy); err != nil {
+			t.Fatalf("record revision %d: %v", revision, err)
+		}
+	}
+	history, err := storage.ListPolicyHistory(ctx, "agent-1", 100)
+	if err != nil || len(history) != 100 {
+		t.Fatalf("history length = %d, %v", len(history), err)
+	}
+	if history[0].Revision != 101 || history[len(history)-1].Revision != 2 {
+		t.Fatalf("retained revisions = %d ... %d", history[0].Revision, history[len(history)-1].Revision)
+	}
+	if _, err := storage.RecordPolicyHistory(ctx, "agent-1", "saved", "admin", "duplicate", history[0].Policy); err == nil {
+		t.Fatal("duplicate immutable history revision was accepted")
+	}
+	if _, err := storage.GetPolicyHistory(ctx, "agent-1", history[0].ID); err != nil {
+		t.Fatalf("get policy history: %v", err)
+	}
+}
+
+func TestAgentTaskLifecycleAndCoalescing(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	ctx := context.Background()
+	if err := storage.CreateAgent(ctx, NewAgent{ID: "agent-1", Name: "first", MachineID: "machine-1", SecretHash: "hash-1"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := storage.CreateAgentTask(ctx, "agent-1", "ban_sync", map[string]bool{"sync": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := storage.CreateAgentTask(ctx, "agent-1", "ban_sync", map[string]bool{"sync": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAfter, _, err := storage.GetAgentTask(ctx, first.ID)
+	if err != nil || firstAfter.State != "canceled" {
+		t.Fatalf("superseded task = %#v, %v", firstAfter, err)
+	}
+	queued, err := storage.QueuedAgentTasks(ctx, "agent-1", 20)
+	if err != nil || len(queued) != 1 || queued[0].ID != second.ID {
+		t.Fatalf("queued tasks = %#v, %v", queued, err)
+	}
+	claimed, payload, err := storage.ClaimAgentTask(ctx, second.ID)
+	if err != nil || claimed.State != "running" || claimed.Attempts != 1 || len(payload) == 0 {
+		t.Fatalf("claimed task = %#v, %s, %v", claimed, payload, err)
+	}
+	if err := storage.FinishAgentTask(ctx, second.ID, false, "temporary failure"); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.RequeueAgentTask(ctx, second.ID, "retry"); err != nil {
+		t.Fatal(err)
+	}
+	if task, _, err := storage.ClaimAgentTask(ctx, second.ID); err != nil || task.Attempts != 2 {
+		t.Fatalf("retried task = %#v, %v", task, err)
+	}
+	if err := storage.FinishAgentTask(ctx, second.ID, true, "done"); err != nil {
+		t.Fatal(err)
+	}
+	completed, _, err := storage.GetAgentTask(ctx, second.ID)
+	if err != nil || completed.State != "succeeded" || completed.Message != "done" {
+		t.Fatalf("completed task = %#v, %v", completed, err)
+	}
+}
+
+func TestAgentTaskRecoveryAndAttemptLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "controller.db")
+	storage, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := storage.CreateAgent(ctx, NewAgent{ID: "agent-1", Name: "first", MachineID: "machine-1", SecretHash: "hash-1"}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := storage.CreateAgentTask(ctx, "agent-1", "ban_sync", map[string]bool{"sync": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := storage.ClaimAgentTask(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	storage, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	recovered, _, err := storage.GetAgentTask(ctx, task.ID)
+	if err != nil || recovered.State != "queued" || recovered.Message != "主控重启后自动恢复排队" {
+		t.Fatalf("recovered task = %#v, %v", recovered, err)
+	}
+
+	for attempt := recovered.Attempts + 1; attempt <= model.AgentTaskMaxAttempts; attempt++ {
+		claimed, _, err := storage.ClaimAgentTask(ctx, task.ID)
+		if err != nil || claimed.Attempts != attempt {
+			t.Fatalf("claim attempt %d = %#v, %v", attempt, claimed, err)
+		}
+		err = storage.RequeueAgentTask(ctx, task.ID, "temporary transport failure")
+		if attempt < model.AgentTaskMaxAttempts && err != nil {
+			t.Fatalf("requeue attempt %d: %v", attempt, err)
+		}
+		if attempt == model.AgentTaskMaxAttempts && !errors.Is(err, ErrTaskAttemptsExhausted) {
+			t.Fatalf("final requeue error = %v", err)
+		}
+	}
+	exhausted, _, err := storage.GetAgentTask(ctx, task.ID)
+	if err != nil || exhausted.State != "failed" || exhausted.Attempts != model.AgentTaskMaxAttempts {
+		t.Fatalf("exhausted task = %#v, %v", exhausted, err)
+	}
+	if err := storage.RequeueAgentTask(ctx, task.ID, "manual retry"); !errors.Is(err, ErrTaskAttemptsExhausted) {
+		t.Fatalf("exhausted task retry error = %v", err)
+	}
+	if err := storage.CancelAgentTask(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.RequeueAgentTask(ctx, task.ID, "must stay canceled"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("canceled task retry error = %v", err)
+	}
+}
+
+func TestHistoricalMetricsUpsertAggregateAndRetention(t *testing.T) {
+	storage, err := Open(filepath.Join(t.TempDir(), "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	ctx := context.Background()
+	if err := storage.CreateAgent(ctx, NewAgent{ID: "agent-1", Name: "first", MachineID: "machine-1", SecretHash: "hash-1"}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 8, 19, 10, 1, 0, 0, time.UTC)
+	write := func(at time.Time, cpu float64, dropped uint64, emergency bool) {
+		t.Helper()
+		telemetry := model.Telemetry{
+			CollectedAt: at.Format(time.RFC3339Nano), CPUUsage: cpu,
+			MemoryUsed: 50, MemoryTotal: 100,
+			Network:   model.NetworkStats{ReceiveBytesPerSecond: 1000, TransmitBytesPerSecond: 500},
+			Sockets:   model.SocketStats{Total: 200, Established: 100, TimeWait: 50, SynRecv: 5},
+			Conntrack: 250, ConntrackMax: 1000, DroppedTotal: dropped,
+			Adaptive: model.AdaptiveStatus{Emergency: emergency},
+		}
+		if err := storage.UpdateTelemetry(ctx, "agent-1", telemetry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(base, 10, 100, false)
+	write(base.Add(20*time.Second), 30, 110, false)
+	write(base.Add(time.Minute), 50, 110, false)
+	write(base.Add(5*time.Minute), 70, 130, true)
+
+	minutePoints, err := storage.ListMetricSamples(ctx, "agent-1", base.Add(-time.Minute), time.Minute)
+	if err != nil || len(minutePoints) != 3 {
+		t.Fatalf("minute points = %#v, %v", minutePoints, err)
+	}
+	if minutePoints[0].CPUUsage != 30 {
+		t.Fatalf("same-minute sample was not replaced: %#v", minutePoints[0])
+	}
+	aggregated, err := storage.ListMetricSamples(ctx, "agent-1", base.Add(-time.Minute), 5*time.Minute)
+	if err != nil || len(aggregated) != 2 {
+		t.Fatalf("aggregated points = %#v, %v", aggregated, err)
+	}
+	if aggregated[0].CPUUsage != 40 || aggregated[0].MemoryPercent != 50 || aggregated[0].ConntrackPercent != 25 {
+		t.Fatalf("first aggregate = %#v", aggregated[0])
+	}
+	if aggregated[1].DroppedDelta != 20 || !aggregated[1].Emergency {
+		t.Fatalf("second aggregate = %#v", aggregated[1])
+	}
+
+	write(base.Add(-31*24*time.Hour), 1, 1, false)
+	write(time.Date(2026, 8, 19, 11, 0, 0, 0, time.UTC), 80, 140, false)
+	retained, err := storage.ListMetricSamples(ctx, "agent-1", base.Add(-32*24*time.Hour), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retained) != 4 {
+		t.Fatalf("retained points = %d, want 4 after old sample cleanup", len(retained))
+	}
+}

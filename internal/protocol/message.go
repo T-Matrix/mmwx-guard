@@ -29,6 +29,7 @@ const (
 	TypeControllerVerified = "controller_verified"
 	TypeAddressReport      = "address_report"
 	TypeRollback           = "rollback_policy"
+	TypeSyncBans           = "sync_bans"
 	TypePing               = "ping"
 	TypePong               = "pong"
 )
@@ -126,6 +127,16 @@ type HelloAck struct {
 	Signature                    string `json:"signature,omitempty"`
 }
 
+type HTTPSOpenResponse struct {
+	SessionID string  `json:"session_id"`
+	Message   Message `json:"message"`
+}
+
+type HTTPSExchange struct {
+	SessionID string          `json:"session_id"`
+	Envelope  *SecureEnvelope `json:"envelope,omitempty"`
+}
+
 type ApplyPolicy struct {
 	Policy model.Policy `json:"policy"`
 }
@@ -144,6 +155,35 @@ type AgentUpdate struct {
 
 type RotateCredential struct {
 	Secret string `json:"secret"`
+}
+
+type SyncBans struct {
+	Bans []model.BanTarget `json:"bans"`
+}
+
+func ValidateSyncBans(value SyncBans, now time.Time) error {
+	if len(value.Bans) > 2048 {
+		return errors.New("too many IP bans")
+	}
+	seen := make(map[netip.Addr]bool, len(value.Bans))
+	for _, ban := range value.Bans {
+		address, err := netip.ParseAddr(strings.TrimSpace(ban.Address))
+		if err != nil || !address.IsValid() || address.IsUnspecified() || address.IsLoopback() || address.IsMulticast() || address.IsLinkLocalUnicast() {
+			return errors.New("IP ban contains an invalid address")
+		}
+		address = address.Unmap()
+		if seen[address] {
+			return errors.New("IP ban list contains a duplicate address")
+		}
+		seen[address] = true
+		if ban.ExpiresAt != "" {
+			expires, parseErr := time.Parse(time.RFC3339Nano, ban.ExpiresAt)
+			if parseErr != nil || !expires.After(now) || expires.After(now.Add(366*24*time.Hour)) {
+				return errors.New("IP ban expiry is invalid")
+			}
+		}
+	}
+	return nil
 }
 
 type ControllerVerified struct {

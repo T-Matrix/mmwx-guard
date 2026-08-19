@@ -13,6 +13,7 @@ const (
 	MaxTopSources   = 256
 	MaxMMWNodes     = 256
 	MaxForwardRules = 512
+	MaxPortHealth   = MaxMMWNodes + MaxForwardRules
 )
 
 type SourceCount struct {
@@ -74,22 +75,41 @@ type Integrations struct {
 	ForwardX *ForwardXIntegration `json:"forwardx,omitempty"`
 }
 
+type PortHealth struct {
+	Key       string `json:"key"`
+	Kind      string `json:"kind"`
+	Port      uint16 `json:"port"`
+	Status    string `json:"status"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+	Error     string `json:"error,omitempty"`
+	CheckedAt string `json:"checked_at"`
+}
+
+type AdaptiveStatus struct {
+	Enabled   bool   `json:"enabled"`
+	Emergency bool   `json:"emergency"`
+	Reason    string `json:"reason,omitempty"`
+	Since     string `json:"since,omitempty"`
+}
+
 type Telemetry struct {
-	CollectedAt    string        `json:"collected_at"`
-	CPUUsage       float64       `json:"cpu_usage"`
-	Load1          float64       `json:"load_1"`
-	Load5          float64       `json:"load_5"`
-	MemoryUsed     uint64        `json:"memory_used"`
-	MemoryTotal    uint64        `json:"memory_total"`
-	Network        NetworkStats  `json:"network"`
-	Sockets        SocketStats   `json:"sockets"`
-	Conntrack      uint64        `json:"conntrack"`
-	ConntrackMax   uint64        `json:"conntrack_max"`
-	DroppedTotal   uint64        `json:"dropped_total"`
-	Protected      bool          `json:"protected"`
-	PolicyRevision int64         `json:"policy_revision"`
-	TopSources     []SourceCount `json:"top_sources"`
-	Integrations   Integrations  `json:"integrations"`
+	CollectedAt    string         `json:"collected_at"`
+	CPUUsage       float64        `json:"cpu_usage"`
+	Load1          float64        `json:"load_1"`
+	Load5          float64        `json:"load_5"`
+	MemoryUsed     uint64         `json:"memory_used"`
+	MemoryTotal    uint64         `json:"memory_total"`
+	Network        NetworkStats   `json:"network"`
+	Sockets        SocketStats    `json:"sockets"`
+	Conntrack      uint64         `json:"conntrack"`
+	ConntrackMax   uint64         `json:"conntrack_max"`
+	DroppedTotal   uint64         `json:"dropped_total"`
+	Protected      bool           `json:"protected"`
+	PolicyRevision int64          `json:"policy_revision"`
+	TopSources     []SourceCount  `json:"top_sources"`
+	Integrations   Integrations   `json:"integrations"`
+	Adaptive       AdaptiveStatus `json:"adaptive"`
+	PortHealth     []PortHealth   `json:"port_health,omitempty"`
 }
 
 func (t Telemetry) Validate(now time.Time) error {
@@ -118,6 +138,28 @@ func (t Telemetry) Validate(now time.Time) error {
 	}
 	if len(t.TopSources) > MaxTopSources {
 		return fmt.Errorf("telemetry has too many top sources: %d", len(t.TopSources))
+	}
+	if len(t.Adaptive.Reason) > 256 {
+		return errors.New("telemetry adaptive reason is too long")
+	}
+	if len(t.PortHealth) > MaxPortHealth {
+		return errors.New("telemetry has too many port health results")
+	}
+	healthKeys := make(map[string]bool, len(t.PortHealth))
+	for _, health := range t.PortHealth {
+		if health.Key == "" || len(health.Key) > 512 || (health.Kind != "mmw" && health.Kind != "forwardx") || health.Port == 0 || (health.Status != "healthy" && health.Status != "unhealthy" && health.Status != "unsupported") || health.LatencyMS < 0 || health.LatencyMS > 60_000 || len(health.Error) > 256 || healthKeys[health.Key] {
+			return errors.New("telemetry contains an invalid port health result")
+		}
+		checkedAt, err := time.Parse(time.RFC3339Nano, health.CheckedAt)
+		if err != nil || checkedAt.After(now.Add(2*time.Minute)) || now.Sub(checkedAt) > 5*time.Minute {
+			return errors.New("telemetry port health timestamp is invalid")
+		}
+		healthKeys[health.Key] = true
+	}
+	if t.Adaptive.Since != "" {
+		if _, err := time.Parse(time.RFC3339Nano, t.Adaptive.Since); err != nil {
+			return errors.New("telemetry adaptive timestamp is invalid")
+		}
 	}
 	for _, source := range t.TopSources {
 		if _, err := netip.ParseAddr(strings.TrimSpace(source.IP)); err != nil || source.Connections < 0 || source.Connections > t.Sockets.Total {
@@ -196,4 +238,5 @@ type AgentSummary struct {
 	ControllerKeyFingerprint string     `json:"controller_key_fingerprint,omitempty"`
 	ControllerVerifiedAt     string     `json:"controller_verified_at,omitempty"`
 	SecureChannel            bool       `json:"secure_channel"`
+	ConnectionTransport      string     `json:"connection_transport,omitempty"`
 }

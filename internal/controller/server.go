@@ -31,21 +31,25 @@ import (
 )
 
 type Server struct {
-	store        *store.Store
-	hub          *Hub
-	web          http.Handler
-	version      string
-	publicURL    string
-	agentDir     string
-	updater      *updater.Manager
-	login        *loginLimiter
-	turnstile    *turnstileVerifier
-	telemetryMu  sync.Mutex
-	telemetryAt  map[string]time.Time
-	connectionMu sync.Mutex
-	connectionAt map[string][]time.Time
-	proxyCIDRs   []netip.Prefix
-	identity     *controllerIdentity
+	store         *store.Store
+	hub           *Hub
+	web           http.Handler
+	version       string
+	publicURL     string
+	agentDir      string
+	updater       *updater.Manager
+	login         *loginLimiter
+	turnstile     *turnstileVerifier
+	telemetryMu   sync.Mutex
+	telemetryAt   map[string]time.Time
+	connectionMu  sync.Mutex
+	connectionAt  map[string][]time.Time
+	adaptiveMu    sync.Mutex
+	adaptiveState map[string]bool
+	taskMu        sync.Mutex
+	taskRunning   map[string]bool
+	proxyCIDRs    []netip.Prefix
+	identity      *controllerIdentity
 }
 
 const dummyPasswordHash = "$2y$12$QYiadX9ftra/wDA5wE0ype4OwM7vOikc9zWS0BHtvnZcmVKgz36Iy"
@@ -63,7 +67,7 @@ func NewServer(database *store.Store, web http.Handler, version, publicURL, agen
 	if err != nil {
 		return nil, err
 	}
-	return &Server{store: database, hub: NewHub(), web: web, version: version, publicURL: strings.TrimRight(publicURL, "/"), agentDir: agentDir, updater: updateManager, login: newLoginLimiter(), turnstile: turnstile, telemetryAt: make(map[string]time.Time), connectionAt: make(map[string][]time.Time), proxyCIDRs: proxyCIDRs, identity: identity}, nil
+	return &Server{store: database, hub: NewHub(), web: web, version: version, publicURL: strings.TrimRight(publicURL, "/"), agentDir: agentDir, updater: updateManager, login: newLoginLimiter(), turnstile: turnstile, telemetryAt: make(map[string]time.Time), connectionAt: make(map[string][]time.Time), adaptiveState: make(map[string]bool), taskRunning: make(map[string]bool), proxyCIDRs: proxyCIDRs, identity: identity}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -80,6 +84,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/agent/enroll", s.handleAgentEnroll)
 	mux.HandleFunc("POST /api/agent/address", s.handleAgentAddress)
 	mux.HandleFunc("GET /api/agent/ws", s.handleAgentWS)
+	mux.HandleFunc("POST /api/agent/https/open", s.handleAgentHTTPSOpen)
+	mux.HandleFunc("POST /api/agent/https/exchange", s.handleAgentHTTPSExchange)
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/admin/summary", s.handleSummary)
 	admin.HandleFunc("POST /api/admin/account/password", s.handleChangePassword)
@@ -90,12 +96,22 @@ func (s *Server) Handler() http.Handler {
 	admin.HandleFunc("POST /api/admin/agents/{id}/credentials/revoke", s.handleRevokeAgentCredential)
 	admin.HandleFunc("POST /api/admin/agents/{id}/pairing", s.handleCreateAgentPairing)
 	admin.HandleFunc("GET /api/admin/agents/{id}/protection", s.handleAgentProtection)
+	admin.HandleFunc("GET /api/admin/agents/{id}/metrics", s.handleAgentMetrics)
+	admin.HandleFunc("GET /api/admin/agents/{id}/diagnostics", s.handleAgentDiagnostics)
 	admin.HandleFunc("PUT /api/admin/agents/{id}/protection", s.handleSaveAgentProtection)
+	admin.HandleFunc("GET /api/admin/agents/{id}/policy-history", s.handlePolicyHistory)
+	admin.HandleFunc("POST /api/admin/agents/{id}/policy-history/{history_id}/restore", s.handleRestorePolicyHistory)
+	admin.HandleFunc("GET /api/admin/agents/{id}/bans", s.handleIPBans)
+	admin.HandleFunc("POST /api/admin/agents/{id}/bans", s.handleCreateIPBan)
+	admin.HandleFunc("DELETE /api/admin/agents/{id}/bans/{ban_id}", s.handleDeleteIPBan)
 	admin.HandleFunc("POST /api/admin/enrollments", s.handleCreateEnrollment)
 	admin.HandleFunc("GET /api/admin/policies", s.handlePolicies)
 	admin.HandleFunc("POST /api/admin/policies", s.handleSavePolicy)
 	admin.HandleFunc("POST /api/admin/policies/{id}/deploy", s.handleDeployPolicy)
 	admin.HandleFunc("GET /api/admin/events", s.handleEvents)
+	admin.HandleFunc("GET /api/admin/tasks", s.handleTasks)
+	admin.HandleFunc("POST /api/admin/tasks/{id}/retry", s.handleRetryTask)
+	admin.HandleFunc("POST /api/admin/tasks/{id}/cancel", s.handleCancelTask)
 	admin.HandleFunc("GET /api/admin/update", s.handleUpdateInfo)
 	admin.HandleFunc("POST /api/admin/update/controller", s.handleControllerUpdate)
 	admin.HandleFunc("POST /api/admin/update/agents", s.handleAgentUpdates)
@@ -235,7 +251,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		_ = s.store.DeleteSession(r.Context(), hashToken(cookie.Value))
 	}
-	clearSessionCookie(w)
+	clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -397,13 +413,6 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	}
 	id := auth.id
 	credentials := auth.credentials
-	if auth.pending {
-		if err := s.store.PromoteCredential(r.Context(), id, auth.presentedHash); err != nil {
-			writeError(w, http.StatusUnauthorized, "Agent 凭据轮换状态无效")
-			return
-		}
-		_ = s.store.AddEvent(r.Context(), "info", "agent_credential_rotated", id, "Agent 新凭据已生效，旧凭据已失效", nil)
-	}
 	if !s.acceptAgentConnection(id, time.Now()) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "Agent 重连过于频繁")
@@ -470,6 +479,12 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stopWrite()
+	if auth.pending {
+		if err := s.promoteAgentCredential(r.Context(), auth); err != nil {
+			_ = conn.Close(websocket.StatusPolicyViolation, "credential rotation state invalid")
+			return
+		}
+	}
 	s.hub.Register(id, conn, secureSession)
 	defer func() {
 		s.hub.Unregister(id, conn)
@@ -477,18 +492,9 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.SetAgentOffline(context.Background(), id)
 		}
 	}()
-	_ = s.store.SetAgentConnected(r.Context(), id, s.clientIP(r), hello.OS, hello.Arch, hello.Version, secureSession != nil)
+	_ = s.store.SetAgentConnected(r.Context(), id, s.clientIP(r), hello.OS, hello.Arch, hello.Version, "websocket", secureSession != nil)
 	_ = s.store.AddEvent(r.Context(), "info", "agent_online", id, "Agent 已连接", map[string]bool{"secure_channel": secureSession != nil})
-	if policy, policyErr := s.store.AgentPolicy(r.Context(), id); policyErr == nil {
-		go func() {
-			ctx, stop := context.WithTimeout(context.Background(), 45*time.Second)
-			defer stop()
-			result, sendErr := s.hub.ApplyPolicy(ctx, id, policy)
-			if sendErr == nil && result.Success {
-				_ = s.store.AssignPolicy(context.Background(), id, policy.ID, policy.Revision)
-			}
-		}()
-	}
+	s.startAgentSynchronization(id)
 	var messageRate agentMessageRate
 	for {
 		msg, readErr := readAgentMessage(r.Context(), conn, secureSession)
@@ -499,43 +505,236 @@ func (s *Server) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close(websocket.StatusPolicyViolation, "message rate exceeded")
 			return
 		}
-		if err := protocol.ValidateFresh(msg, time.Now(), 2*time.Minute); err != nil {
-			_ = conn.Close(websocket.StatusPolicyViolation, "stale or invalid message")
+		if err := s.handleAgentMessage(r.Context(), id, secureSession != nil, msg); err != nil {
+			_ = conn.Close(websocket.StatusPolicyViolation, err.Error())
 			return
 		}
-		switch msg.Type {
-		case protocol.TypeTelemetry:
-			var value model.Telemetry
-			if len(msg.Payload) > protocol.MaxTelemetryPayloadBytes || json.Unmarshal(msg.Payload, &value) != nil || value.Validate(time.Now()) != nil {
-				_ = conn.Close(websocket.StatusInvalidFramePayloadData, "invalid telemetry")
-				return
-			}
-			if s.acceptTelemetry(id, time.Now()) {
-				_ = s.store.UpdateTelemetry(r.Context(), id, value)
-			}
-		case protocol.TypeApplyResult, protocol.TypeUpdateResult, protocol.TypeRotateResult:
-			var result protocol.ApplyResult
-			if json.Unmarshal(msg.Payload, &result) == nil && protocol.ValidateResult(msg, result) == nil {
-				s.hub.Resolve(msg.RequestID, result)
-			}
-		case protocol.TypePong:
-			_ = s.store.TouchAgent(r.Context(), id)
-		case protocol.TypeControllerVerified:
-			var value protocol.ControllerVerified
-			if secureSession == nil || json.Unmarshal(msg.Payload, &value) != nil || subtle.ConstantTimeCompare([]byte(value.Fingerprint), []byte(s.identity.fingerprint())) != 1 {
-				_ = conn.Close(websocket.StatusPolicyViolation, "controller verification failed")
-				return
-			}
-			_ = s.store.MarkControllerVerified(r.Context(), id, value.Fingerprint)
-		case protocol.TypeAddressReport:
-			var value protocol.AddressReport
-			if secureSession == nil || len(msg.Payload) > 1024 || json.Unmarshal(msg.Payload, &value) != nil || protocol.ValidateAddressReport(value) != nil {
-				_ = conn.Close(websocket.StatusPolicyViolation, "invalid address report")
-				return
-			}
-			_ = s.store.SetAgentPublicAddresses(r.Context(), id, value.IPv4, value.IPv6)
+	}
+}
+
+func (s *Server) handleAgentHTTPSOpen(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	auth, err := s.authenticateAgentRequest(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "Agent 认证失败")
+		return
+	}
+	if !s.acceptAgentConnection(auth.id, time.Now()) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "Agent 重连过于频繁")
+		return
+	}
+	var first protocol.Message
+	if !decodeJSONLimit(w, r, &first, protocol.MaxMessageBytes) {
+		return
+	}
+	if first.Type != protocol.TypeHello {
+		writeError(w, http.StatusBadRequest, "HTTPS 备用通道必须先发送握手消息")
+		return
+	}
+	var hello protocol.Hello
+	if json.Unmarshal(first.Payload, &hello) != nil || protocol.ValidateFresh(first, time.Now(), 2*time.Minute) != nil || protocol.ValidateHello(hello) != nil || hello.Challenge == "" || hello.AgentEphemeralPublicKey == "" {
+		writeError(w, http.StatusBadRequest, "安全握手内容无效")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(hello.MachineID), []byte(auth.credentials.MachineID)) != 1 {
+		_ = s.store.AddEvent(r.Context(), "error", "agent_identity_mismatch", auth.id, "Agent 机器标识不匹配，HTTPS备用连接已拒绝", map[string]string{"ip": s.clientIP(r)})
+		writeError(w, http.StatusForbidden, "Agent 机器标识不匹配")
+		return
+	}
+	if hello.ControllerKeyFingerprint != "" && subtle.ConstantTimeCompare([]byte(hello.ControllerKeyFingerprint), []byte(s.identity.fingerprint())) != 1 {
+		_ = s.store.AddEvent(r.Context(), "error", "controller_identity_mismatch", auth.id, "Agent 固定的主控身份与当前主控不一致，HTTPS备用连接已拒绝", map[string]string{"ip": s.clientIP(r)})
+		writeError(w, http.StatusForbidden, "主控身份不匹配")
+		return
+	}
+	agentPublic, err := protocol.DecodeKey(hello.AgentEphemeralPublicKey, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Agent 临时密钥无效")
+		return
+	}
+	controllerEphemeral, err := protocol.GenerateEphemeralKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "生成安全会话失败")
+		return
+	}
+	controllerPublic := controllerEphemeral.PublicKey()
+	session, err := protocol.DeriveSecureSession(controllerEphemeral, agentPublic, true)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "建立安全会话失败")
+		return
+	}
+	ackPayload := protocol.HelloAck{
+		Version: s.version, Secure: true, ControllerPublicKey: protocol.EncodeKey(s.identity.publicKey()),
+		ControllerEphemeralPublicKey: protocol.EncodeKey(controllerPublic),
+		Signature:                    protocol.EncodeKey(s.identity.sign(protocol.HandshakeTranscript(auth.id, hello.MachineID, hello.Challenge, agentPublic, controllerPublic))),
+	}
+	ack, _ := protocol.NewMessage(protocol.TypeHelloAck, "", ackPayload)
+	sessionID, err := randomToken(24)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "生成安全会话标识失败")
+		return
+	}
+	if auth.pending {
+		if err := s.promoteAgentCredential(r.Context(), auth); err != nil {
+			writeError(w, http.StatusUnauthorized, "Agent 凭据轮换状态无效")
+			return
 		}
 	}
+	s.hub.RegisterHTTPS(auth.id, sessionID, session)
+	_ = s.store.SetAgentConnected(r.Context(), auth.id, s.clientIP(r), hello.OS, hello.Arch, hello.Version, "https_pull", true)
+	_ = s.store.AddEvent(r.Context(), "info", "agent_https_fallback", auth.id, "Agent 已切换到 HTTPS Push/Pull 备用通道", map[string]bool{"secure_channel": true})
+	s.startAgentSynchronization(auth.id)
+	go s.expireAgentHTTPSSession(auth.id, sessionID)
+	writeJSON(w, http.StatusCreated, protocol.HTTPSOpenResponse{SessionID: sessionID, Message: ack})
+}
+
+func (s *Server) handleAgentHTTPSExchange(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	auth, err := s.authenticateAgentRequest(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "Agent 认证失败")
+		return
+	}
+	var exchange protocol.HTTPSExchange
+	if !decodeJSONLimit(w, r, &exchange, protocol.MaxMessageBytes) {
+		return
+	}
+	if len(exchange.SessionID) < 20 || len(exchange.SessionID) > 128 {
+		writeError(w, http.StatusBadRequest, "HTTPS 安全会话标识无效")
+		return
+	}
+	release, err := s.hub.BeginHTTPSExchange(auth.id, exchange.SessionID)
+	if errors.Is(err, errHTTPSExchangeBusy) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "同一 HTTPS 会话已有交换请求正在处理")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, "HTTPS 安全会话已失效，请重新握手")
+		return
+	}
+	defer release()
+	if exchange.Envelope != nil {
+		message, err := s.hub.DecryptHTTPS(auth.id, exchange.SessionID, *exchange.Envelope)
+		if err != nil || s.handleAgentMessage(r.Context(), auth.id, true, message) != nil {
+			s.hub.UnregisterHTTPS(auth.id, exchange.SessionID)
+			_ = s.store.SetAgentOffline(context.Background(), auth.id)
+			writeError(w, http.StatusForbidden, "加密消息无效或已重放")
+			return
+		}
+	}
+	pullCtx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+	defer cancel()
+	envelope, err := s.hub.NextHTTPSEnvelope(pullCtx, auth.id, exchange.SessionID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "HTTPS 安全会话已被替换")
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.HTTPSExchange{SessionID: exchange.SessionID, Envelope: envelope})
+}
+
+func (s *Server) expireAgentHTTPSSession(agentID, sessionID string) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if s.hub.HTTPSSessionActive(agentID, sessionID, 45*time.Second) {
+			continue
+		}
+		if s.hub.UnregisterHTTPS(agentID, sessionID) {
+			_ = s.store.SetAgentOffline(context.Background(), agentID)
+			_ = s.store.AddEvent(context.Background(), "warning", "agent_https_expired", agentID, "Agent HTTPS 备用会话超时", nil)
+		}
+		return
+	}
+}
+
+func (s *Server) startAgentSynchronization(agentID string) {
+	if policy, err := s.store.AgentPolicy(context.Background(), agentID); err == nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			result, sendErr := s.hub.ApplyPolicy(ctx, agentID, policy)
+			if sendErr == nil && result.Success {
+				_ = s.store.AssignPolicy(context.Background(), agentID, policy.ID, policy.Revision)
+				_ = s.syncAgentBans(ctx, agentID)
+			}
+			go s.processQueuedAgentTasks(agentID)
+		}()
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = s.syncAgentBans(ctx, agentID)
+		go s.processQueuedAgentTasks(agentID)
+	}()
+}
+
+func (s *Server) handleAgentMessage(ctx context.Context, agentID string, secure bool, message protocol.Message) error {
+	if err := protocol.ValidateFresh(message, time.Now(), 2*time.Minute); err != nil {
+		return err
+	}
+	switch message.Type {
+	case protocol.TypeTelemetry:
+		var value model.Telemetry
+		if len(message.Payload) > protocol.MaxTelemetryPayloadBytes || json.Unmarshal(message.Payload, &value) != nil || value.Validate(time.Now()) != nil {
+			return errors.New("invalid telemetry")
+		}
+		if s.acceptTelemetry(agentID, time.Now()) {
+			_ = s.store.UpdateTelemetry(ctx, agentID, value)
+			if transition := s.adaptiveTransition(agentID, value.Adaptive.Emergency); transition == "activated" {
+				_ = s.store.AddEvent(ctx, "warning", "adaptive_emergency_activated", agentID, "自适应应急保护已启动: "+value.Adaptive.Reason, nil)
+			} else if transition == "recovered" {
+				_ = s.store.AddEvent(ctx, "info", "adaptive_emergency_recovered", agentID, "连接压力已恢复，自适应应急保护已退出", nil)
+			}
+		}
+	case protocol.TypeApplyResult, protocol.TypeUpdateResult, protocol.TypeRotateResult:
+		var result protocol.ApplyResult
+		if json.Unmarshal(message.Payload, &result) != nil || protocol.ValidateResult(message, result) != nil {
+			return errors.New("invalid Agent result")
+		}
+		s.hub.Resolve(message.RequestID, result)
+	case protocol.TypePong:
+		_ = s.store.TouchAgent(ctx, agentID)
+	case protocol.TypeControllerVerified:
+		var value protocol.ControllerVerified
+		if !secure || json.Unmarshal(message.Payload, &value) != nil || subtle.ConstantTimeCompare([]byte(value.Fingerprint), []byte(s.identity.fingerprint())) != 1 {
+			return errors.New("controller verification failed")
+		}
+		_ = s.store.MarkControllerVerified(ctx, agentID, value.Fingerprint)
+	case protocol.TypeAddressReport:
+		var value protocol.AddressReport
+		if !secure || len(message.Payload) > 1024 || json.Unmarshal(message.Payload, &value) != nil || protocol.ValidateAddressReport(value) != nil {
+			return errors.New("invalid address report")
+		}
+		_ = s.store.SetAgentPublicAddresses(ctx, agentID, value.IPv4, value.IPv6)
+	default:
+		return errors.New("unsupported Agent message")
+	}
+	return nil
+}
+
+func (s *Server) adaptiveTransition(agentID string, emergency bool) string {
+	s.adaptiveMu.Lock()
+	defer s.adaptiveMu.Unlock()
+	if s.adaptiveState == nil {
+		s.adaptiveState = make(map[string]bool)
+	}
+	previous, known := s.adaptiveState[agentID]
+	s.adaptiveState[agentID] = emergency
+	if !known {
+		if emergency {
+			return "activated"
+		}
+		return ""
+	}
+	if previous == emergency {
+		return ""
+	}
+	if emergency {
+		return "activated"
+	}
+	return "recovered"
 }
 
 type agentAuthentication struct {
@@ -543,6 +742,17 @@ type agentAuthentication struct {
 	credentials   store.AgentCredentials
 	presentedHash string
 	pending       bool
+}
+
+func (s *Server) promoteAgentCredential(ctx context.Context, auth agentAuthentication) error {
+	if !auth.pending {
+		return nil
+	}
+	if err := s.store.PromoteCredential(ctx, auth.id, auth.presentedHash); err != nil {
+		return err
+	}
+	_ = s.store.AddEvent(ctx, "info", "agent_credential_rotated", auth.id, "Agent 新凭据已生效，旧凭据已失效", nil)
+	return nil
 }
 
 func (s *Server) authenticateAgentRequest(r *http.Request) (agentAuthentication, error) {
@@ -800,12 +1010,46 @@ func (s *Server) handleAgentProtection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"policy": nil})
 }
 
-func (s *Server) handleSaveAgentProtection(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request) {
 	agentID := r.PathValue("id")
-	if !s.hub.Online(agentID) {
-		writeError(w, http.StatusConflict, "服务器当前离线，无法验证并应用防护设置")
+	if exists, err := s.store.AgentExists(r.Context(), agentID); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取服务器失败")
+		return
+	} else if !exists {
+		writeError(w, http.StatusNotFound, "服务器不存在")
 		return
 	}
+	type metricRange struct {
+		duration time.Duration
+		step     time.Duration
+	}
+	ranges := map[string]metricRange{
+		"1h":  {duration: time.Hour, step: time.Minute},
+		"6h":  {duration: 6 * time.Hour, step: 5 * time.Minute},
+		"24h": {duration: 24 * time.Hour, step: 15 * time.Minute},
+		"7d":  {duration: 7 * 24 * time.Hour, step: time.Hour},
+		"30d": {duration: 30 * 24 * time.Hour, step: 6 * time.Hour},
+	}
+	rangeName := r.URL.Query().Get("range")
+	if rangeName == "" {
+		rangeName = "24h"
+	}
+	selected, ok := ranges[rangeName]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "指标时间范围无效")
+		return
+	}
+	points, err := s.store.ListMetricSamples(r.Context(), agentID, time.Now().Add(-selected.duration), selected.step)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取历史指标失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"range": rangeName, "step_seconds": int(selected.step / time.Second), "points": points})
+}
+
+func (s *Server) handleSaveAgentProtection(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	online := s.hub.Online(agentID)
 	var policy model.Policy
 	if !decodeJSON(w, r, &policy) {
 		return
@@ -836,30 +1080,446 @@ func (s *Server) handleSaveAgentProtection(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	author, _ := s.currentAdmin(r)
+	previousTasks, _ := s.store.QueuedAgentTasks(r.Context(), agentID, 100)
+	task, err := s.store.CreateAgentTask(r.Context(), agentID, "policy_deploy", model.PolicyDeployTask{PolicyID: saved.ID, PreviousPolicyID: current.ID, Author: author, Source: "saved"})
+	if err != nil {
+		_ = s.store.DeletePolicyIfUnassigned(r.Context(), saved.ID)
+		writeError(w, http.StatusInternalServerError, "创建策略下发任务失败")
+		return
+	}
+	for _, previousTask := range previousTasks {
+		if previousTask.Kind != "policy_deploy" {
+			continue
+		}
+		_, payload, getErr := s.store.GetAgentTask(r.Context(), previousTask.ID)
+		var previous model.PolicyDeployTask
+		if getErr == nil && json.Unmarshal(payload, &previous) == nil && previous.PolicyID != saved.ID {
+			_ = s.store.DeletePolicyIfUnassigned(r.Context(), previous.PolicyID)
+		}
+	}
+	if !online {
+		_ = s.store.AddEvent(r.Context(), "info", "policy_deploy_queued", agentID, "服务器离线，防护策略已加入等待队列", map[string]any{"task_id": task.ID, "revision": saved.Revision})
+		writeJSON(w, http.StatusAccepted, map[string]any{"policy": saved, "message": "策略已保存，Agent上线后自动验证并下发", "queued": true, "task_id": task.ID})
+		return
+	}
+	if _, _, err := s.store.ClaimAgentTask(r.Context(), task.ID); err != nil {
+		writeError(w, http.StatusConflict, "策略任务状态已变化，请刷新后重试")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 	result, err := s.hub.ApplyPolicy(ctx, agentID, saved)
 	cancel()
 	if err != nil {
-		_ = s.store.DeletePolicyIfUnassigned(r.Context(), saved.ID)
+		_ = s.store.FinishAgentTask(r.Context(), task.ID, false, err.Error())
 		_ = s.store.AddEvent(r.Context(), "error", "policy_deploy", agentID, err.Error(), map[string]any{"policy_id": saved.ID, "revision": saved.Revision})
 		writeError(w, http.StatusBadGateway, "下发失败: "+err.Error())
 		return
 	}
 	if !result.Success {
-		_ = s.store.DeletePolicyIfUnassigned(r.Context(), saved.ID)
+		_ = s.store.FinishAgentTask(r.Context(), task.ID, false, result.Message)
 		_ = s.store.AddEvent(r.Context(), "error", "policy_deploy", agentID, result.Message, map[string]any{"policy_id": saved.ID, "revision": saved.Revision})
 		writeError(w, http.StatusBadRequest, "应用失败: "+result.Message)
 		return
 	}
 	if err := s.store.AssignPolicy(r.Context(), agentID, saved.ID, saved.Revision); err != nil {
+		_ = s.store.FinishAgentTask(r.Context(), task.ID, false, "防护已应用，但保存服务器归属失败")
 		writeError(w, http.StatusInternalServerError, "防护已应用，但保存服务器归属失败")
 		return
 	}
+	if _, err := s.store.RecordPolicyHistory(r.Context(), agentID, "saved", author, "服务器防护设置已保存并应用", saved); err != nil {
+		_ = s.store.AddEvent(r.Context(), "error", "policy_history_failed", agentID, "防护已应用，但历史快照保存失败: "+err.Error(), nil)
+	}
+	_ = s.store.FinishAgentTask(r.Context(), task.ID, true, "策略已验证并应用")
 	if currentErr == nil {
 		_ = s.store.DeletePolicyIfUnassigned(r.Context(), current.ID)
 	}
+	_ = s.syncAgentBans(r.Context(), agentID)
 	_ = s.store.AddEvent(r.Context(), "info", "policy_deploy", agentID, "服务器防护设置已保存并应用", map[string]any{"policy_id": saved.ID, "revision": saved.Revision})
 	writeJSON(w, http.StatusOK, map[string]any{"policy": saved, "message": result.Message})
+}
+
+func (s *Server) handlePolicyHistory(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	if exists, err := s.store.AgentExists(r.Context(), agentID); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取服务器失败")
+		return
+	} else if !exists {
+		writeError(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+	history, err := s.store.ListPolicyHistory(r.Context(), agentID, 100)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取策略历史失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"history": history})
+}
+
+func (s *Server) handleRestorePolicyHistory(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	if !s.hub.Online(agentID) {
+		writeError(w, http.StatusConflict, "服务器当前离线，无法验证并恢复策略")
+		return
+	}
+	historyID, err := strconv.ParseInt(r.PathValue("history_id"), 10, 64)
+	if err != nil || historyID < 1 {
+		writeError(w, http.StatusBadRequest, "历史记录编号无效")
+		return
+	}
+	history, err := s.store.GetPolicyHistory(r.Context(), agentID, historyID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "策略历史不存在")
+		return
+	}
+	current, err := s.store.AgentPolicy(r.Context(), agentID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "服务器当前没有可恢复的防护策略")
+		return
+	}
+	policy := history.Policy
+	policy.ID = 0
+	policy.Revision = current.Revision + 1
+	saved, err := s.store.SavePolicy(r.Context(), policy)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "历史策略校验失败: "+err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	result, applyErr := s.hub.ApplyPolicy(ctx, agentID, saved)
+	cancel()
+	if applyErr != nil || !result.Success {
+		_ = s.store.DeletePolicyIfUnassigned(r.Context(), saved.ID)
+		message := result.Message
+		if applyErr != nil {
+			message = applyErr.Error()
+		}
+		_ = s.store.AddEvent(r.Context(), "error", "policy_restore_failed", agentID, "策略恢复失败: "+message, map[string]any{"history_id": historyID})
+		writeError(w, http.StatusBadGateway, "恢复失败: "+message)
+		return
+	}
+	if err := s.store.AssignPolicy(r.Context(), agentID, saved.ID, saved.Revision); err != nil {
+		writeError(w, http.StatusInternalServerError, "策略已恢复，但保存服务器归属失败")
+		return
+	}
+	author, _ := s.currentAdmin(r)
+	message := fmt.Sprintf("从 REV %d 恢复，生成 REV %d", history.Revision, saved.Revision)
+	if _, err := s.store.RecordPolicyHistory(r.Context(), agentID, "restored", author, message, saved); err != nil {
+		_ = s.store.AddEvent(r.Context(), "error", "policy_history_failed", agentID, "策略已恢复，但历史快照保存失败: "+err.Error(), nil)
+	}
+	_ = s.store.DeletePolicyIfUnassigned(r.Context(), current.ID)
+	_ = s.syncAgentBans(r.Context(), agentID)
+	_ = s.store.AddEvent(r.Context(), "warning", "policy_restored", agentID, message, map[string]any{"history_id": historyID, "revision": saved.Revision})
+	writeJSON(w, http.StatusOK, map[string]any{"policy": saved, "message": message})
+}
+
+func (s *Server) handleIPBans(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	if exists, err := s.store.AgentExists(r.Context(), agentID); err != nil {
+		writeError(w, http.StatusInternalServerError, "读取服务器失败")
+		return
+	} else if !exists {
+		writeError(w, http.StatusNotFound, "服务器不存在")
+		return
+	}
+	bans, err := s.store.ListIPBans(r.Context(), agentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取IP封禁列表失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bans": bans})
+}
+
+func (s *Server) handleCreateIPBan(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	policy, err := s.store.AgentPolicy(r.Context(), agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusConflict, "请先为服务器保存并下发防护策略")
+		} else {
+			writeError(w, http.StatusInternalServerError, "读取服务器防护设置失败")
+		}
+		return
+	}
+	var req struct {
+		Address         string `json:"address"`
+		Reason          string `json:"reason"`
+		DurationMinutes int    `json:"duration_minutes"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	address, parseErr := netip.ParseAddr(strings.TrimSpace(req.Address))
+	if parseErr != nil || address.IsUnspecified() || address.IsLoopback() || address.IsMulticast() || address.IsLinkLocalUnicast() {
+		writeError(w, http.StatusBadRequest, "请输入有效的单个IPv4或IPv6地址")
+		return
+	}
+	address = address.Unmap()
+	if trustedAddress(policy, address) {
+		writeError(w, http.StatusConflict, "该地址属于可信前置范围，不能加入黑名单")
+		return
+	}
+	if req.DurationMinutes < 0 || req.DurationMinutes > 43200 {
+		writeError(w, http.StatusBadRequest, "临时封禁时长应在1分钟到30天之间，0表示永久")
+		return
+	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	if req.Reason == "" {
+		req.Reason = "管理员手工封禁"
+	}
+	if utf8.RuneCountInString(req.Reason) > 200 {
+		writeError(w, http.StatusBadRequest, "封禁原因不能超过200个字符")
+		return
+	}
+	var expiresAt time.Time
+	if req.DurationMinutes > 0 {
+		expiresAt = time.Now().Add(time.Duration(req.DurationMinutes) * time.Minute)
+	}
+	ban, err := s.store.SaveIPBan(r.Context(), agentID, address.String(), req.Reason, expiresAt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存IP封禁失败")
+		return
+	}
+	task, err := s.store.CreateAgentTask(r.Context(), agentID, "ban_sync", map[string]bool{"sync": true})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建黑名单同步任务失败")
+		return
+	}
+	status := http.StatusAccepted
+	message := "Agent离线，封禁已保存，将在上线后自动应用"
+	if s.hub.Online(agentID) {
+		if syncErr := s.executeAgentTask(r.Context(), task.ID); syncErr == nil {
+			status = http.StatusCreated
+			message = "IP封禁已保存并应用"
+		} else {
+			message = "封禁已保存，同步任务失败，可在任务中心重试: " + syncErr.Error()
+		}
+	} else {
+		status = http.StatusAccepted
+	}
+	updated, _ := s.store.GetIPBan(r.Context(), agentID, address.String())
+	if updated.ID != 0 {
+		ban = updated
+	}
+	_ = s.store.AddEvent(r.Context(), "warning", "ip_ban_created", agentID, "封禁IP: "+address.String(), map[string]any{"expires_at": ban.ExpiresAt, "reason": req.Reason})
+	writeJSON(w, status, map[string]any{"ban": ban, "message": message})
+}
+
+func (s *Server) handleDeleteIPBan(w http.ResponseWriter, r *http.Request) {
+	agentID := r.PathValue("id")
+	banID, err := strconv.ParseInt(r.PathValue("ban_id"), 10, 64)
+	if err != nil || banID < 1 {
+		writeError(w, http.StatusBadRequest, "封禁记录编号无效")
+		return
+	}
+	if err := s.store.DeleteIPBan(r.Context(), agentID, banID); err != nil {
+		writeError(w, http.StatusNotFound, "封禁记录不存在")
+		return
+	}
+	task, err := s.store.CreateAgentTask(r.Context(), agentID, "ban_sync", map[string]bool{"sync": true})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建解封同步任务失败")
+		return
+	}
+	message := "解封已保存，将在Agent上线后同步"
+	if s.hub.Online(agentID) {
+		if syncErr := s.executeAgentTask(r.Context(), task.ID); syncErr == nil {
+			message = "IP封禁已解除"
+		} else {
+			message = "解封已保存，同步任务失败，可在任务中心重试: " + syncErr.Error()
+		}
+	}
+	_ = s.store.AddEvent(r.Context(), "info", "ip_ban_deleted", agentID, "IP封禁已解除", map[string]int64{"ban_id": banID})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": message})
+}
+
+func (s *Server) syncAgentBans(ctx context.Context, agentID string) error {
+	bans, err := s.store.ListIPBans(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	targets := make([]model.BanTarget, 0, len(bans))
+	for _, ban := range bans {
+		targets = append(targets, model.BanTarget{Address: ban.Address, ExpiresAt: ban.ExpiresAt})
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	result, err := s.hub.SyncBans(syncCtx, agentID, targets)
+	if err != nil {
+		_ = s.store.SetIPBansApplyState(context.Background(), agentID, false, err.Error())
+		return err
+	}
+	if !result.Success {
+		_ = s.store.SetIPBansApplyState(context.Background(), agentID, false, result.Message)
+		return errors.New(result.Message)
+	}
+	return s.store.SetIPBansApplyState(context.Background(), agentID, true, "")
+}
+
+func trustedAddress(policy model.Policy, address netip.Addr) bool {
+	for _, raw := range policy.TrustedCIDRs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			trusted, addressErr := netip.ParseAddr(strings.TrimSpace(raw))
+			if addressErr == nil && trusted.Unmap() == address {
+				return true
+			}
+			continue
+		}
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
+	tasks, err := s.store.ListAgentTasks(r.Context(), 500)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取任务中心失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+}
+
+func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
+	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || taskID < 1 {
+		writeError(w, http.StatusBadRequest, "任务编号无效")
+		return
+	}
+	task, _, err := s.store.GetAgentTask(r.Context(), taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if task.State != "failed" {
+		writeError(w, http.StatusConflict, "只有失败的任务可以重试")
+		return
+	}
+	if err := s.store.RequeueAgentTask(r.Context(), taskID, "管理员请求重试"); err != nil {
+		writeError(w, http.StatusConflict, "任务无法重试")
+		return
+	}
+	if s.hub.Online(task.AgentID) {
+		go s.processQueuedAgentTasks(task.AgentID)
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
+	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || taskID < 1 {
+		writeError(w, http.StatusBadRequest, "任务编号无效")
+		return
+	}
+	task, payload, getErr := s.store.GetAgentTask(r.Context(), taskID)
+	if getErr != nil {
+		writeError(w, http.StatusNotFound, "任务不存在")
+		return
+	}
+	if err := s.store.CancelAgentTask(r.Context(), taskID); err != nil {
+		writeError(w, http.StatusConflict, "只有等待中或失败的任务可以取消")
+		return
+	}
+	if task.Kind == "policy_deploy" {
+		var request model.PolicyDeployTask
+		if json.Unmarshal(payload, &request) == nil {
+			_ = s.store.DeletePolicyIfUnassigned(r.Context(), request.PolicyID)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) processQueuedAgentTasks(agentID string) {
+	s.taskMu.Lock()
+	if s.taskRunning == nil {
+		s.taskRunning = make(map[string]bool)
+	}
+	if s.taskRunning[agentID] {
+		s.taskMu.Unlock()
+		return
+	}
+	s.taskRunning[agentID] = true
+	s.taskMu.Unlock()
+	defer func() {
+		s.taskMu.Lock()
+		delete(s.taskRunning, agentID)
+		s.taskMu.Unlock()
+	}()
+	for s.hub.Online(agentID) {
+		tasks, err := s.store.QueuedAgentTasks(context.Background(), agentID, 20)
+		if err != nil || len(tasks) == 0 {
+			return
+		}
+		for _, task := range tasks {
+			if !s.hub.Online(agentID) {
+				return
+			}
+			if err := s.executeAgentTask(context.Background(), task.ID); err != nil && !s.hub.Online(agentID) {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) executeAgentTask(ctx context.Context, taskID int64) error {
+	task, payload, err := s.store.ClaimAgentTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	fail := func(runErr error, retry bool) error {
+		if retry {
+			if err := s.store.RequeueAgentTask(context.Background(), task.ID, runErr.Error()); errors.Is(err, store.ErrTaskAttemptsExhausted) {
+				_ = s.store.AddEvent(context.Background(), "error", "agent_task_exhausted", task.AgentID, "任务已达到最大尝试次数: "+runErr.Error(), map[string]any{"task_id": task.ID, "kind": task.Kind})
+			}
+		} else {
+			_ = s.store.FinishAgentTask(context.Background(), task.ID, false, runErr.Error())
+		}
+		return runErr
+	}
+	switch task.Kind {
+	case "ban_sync":
+		if err := s.syncAgentBans(ctx, task.AgentID); err != nil {
+			return fail(err, !s.hub.Online(task.AgentID))
+		}
+		_ = s.store.FinishAgentTask(context.Background(), task.ID, true, "IP封禁列表已同步")
+		return nil
+	case "policy_deploy":
+		var request model.PolicyDeployTask
+		if json.Unmarshal(payload, &request) != nil || request.PolicyID < 1 {
+			return fail(errors.New("策略任务载荷无效"), false)
+		}
+		policy, err := s.store.GetPolicy(ctx, request.PolicyID)
+		if err != nil {
+			return fail(errors.New("待下发策略不存在"), false)
+		}
+		applyCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
+		result, applyErr := s.hub.ApplyPolicy(applyCtx, task.AgentID, policy)
+		cancel()
+		if applyErr != nil {
+			return fail(applyErr, !s.hub.Online(task.AgentID))
+		}
+		if !result.Success {
+			return fail(errors.New(result.Message), false)
+		}
+		if err := s.store.AssignPolicy(ctx, task.AgentID, policy.ID, policy.Revision); err != nil {
+			return fail(err, false)
+		}
+		message := "排队策略已验证并应用"
+		if _, err := s.store.RecordPolicyHistory(ctx, task.AgentID, request.Source, request.Author, message, policy); err != nil {
+			_ = s.store.AddEvent(context.Background(), "error", "policy_history_failed", task.AgentID, "策略已应用，但历史快照保存失败: "+err.Error(), nil)
+		}
+		if request.PreviousPolicyID != 0 {
+			_ = s.store.DeletePolicyIfUnassigned(ctx, request.PreviousPolicyID)
+		}
+		_ = s.syncAgentBans(ctx, task.AgentID)
+		_ = s.store.FinishAgentTask(context.Background(), task.ID, true, message)
+		_ = s.store.AddEvent(context.Background(), "info", "policy_deploy_completed", task.AgentID, message, map[string]any{"task_id": task.ID, "revision": policy.Revision})
+		return nil
+	default:
+		return fail(errors.New("不支持的任务类型"), false)
+	}
 }
 
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
@@ -1065,7 +1725,11 @@ func localAsset(path string) (updater.Asset, error) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	return decodeJSONLimit(w, r, dst, 2<<20)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {

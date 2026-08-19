@@ -2,14 +2,14 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState
 import {
   Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowUp, Check, ChevronDown, ChevronRight, CircleGauge, Clipboard, Copy,
   Cable, Cpu, Download, ExternalLink, FileClock, Filter, KeyRound, Link2, Link2Off, ListFilter, LockKeyhole, LogOut, Maximize2, Moon,
-  Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, RotateCw, Save, Search, Server, Settings2,
-  ShieldCheck, ShieldX, SlidersHorizontal, Sun, Trash2, X, Zap,
+  ListTodo, Network, PackageCheck, Pencil, Plus, Radio, RefreshCw, RotateCw, Save, Search, Server, Settings2,
+  ShieldBan, ShieldCheck, ShieldX, SlidersHorizontal, Sun, Trash2, X, Zap,
 } from 'lucide-react'
 import { api } from './api'
-import type { Agent, EventItem, MMWNode, Policy, PortRule, SourceCount, Status as SystemStatus, UpdateInfo } from './api'
+import type { Agent, AgentTask, EventItem, IPBan, MetricPoint, MMWNode, Policy, PolicyHistory, PortHealth, PortRule, SourceCount, Status as SystemStatus, UpdateInfo } from './api'
 
-type Tab = 'overview' | 'agents' | 'events' | 'updates'
-type DetailTab = 'overview' | 'protection' | 'services' | 'security' | 'events'
+type Tab = 'overview' | 'agents' | 'tasks' | 'events' | 'updates'
+type DetailTab = 'overview' | 'metrics' | 'protection' | 'bans' | 'services' | 'security' | 'events'
 type RouteState = { tab: Tab; agentID: string; detailTab: DetailTab }
 type Summary = { agents_total: number; agents_online: number; sockets: number; established: number; time_wait: number; conntrack: number; dropped: number; protected: number }
 type EditablePortRule = PortRule & { manual: boolean; source_rules: string[] }
@@ -122,6 +122,7 @@ function App() {
           <PageTitle tab={tab} busy={busy} onRefresh={() => void refresh()} />
           {tab === 'overview' && <Overview summary={summary} agents={agents} events={events} />}
           {tab === 'agents' && <Agents agents={agents} onEnroll={() => setEnrollOpen(true)} onOpen={agent => navigate({ tab: 'agents', agentID: agent.id, detailTab: 'overview' })} onRename={setRenameAgent} onDelete={setDeleteAgent} />}
+		  {tab === 'tasks' && <TaskCenter agents={agents} />}
           {tab === 'events' && <Events events={events} agents={agents} />}
           {tab === 'updates' && <Updates currentVersion={status.version} agents={agents} onRefresh={() => void refresh(true)} />}
         </>}
@@ -145,6 +146,7 @@ function Header({ tab, setTab, theme, setTheme, admin, version, updateAvailable,
   const items: { id: Tab; label: string; icon: typeof Activity }[] = [
     { id: 'overview', label: '安全概览', icon: Activity },
     { id: 'agents', label: '服务器管理', icon: Server },
+	{ id: 'tasks', label: '任务中心', icon: ListTodo },
     { id: 'events', label: '拦截记录', icon: ListFilter },
   ]
   return (
@@ -181,6 +183,7 @@ function PageTitle({ tab, busy, onRefresh }: { tab: Tab; busy: boolean; onRefres
   const titles: Record<Tab, [string, string]> = {
     overview: ['安全概览', '所有服务器的实时连接与防护状态'],
     agents: ['服务器管理', '注册、查看并批量管理安全防护 Agent'],
+	tasks: ['任务中心', '查看离线队列、执行结果与失败原因'],
     events: ['拦截记录', '策略下发、服务器状态和安全事件审计'],
     updates: ['版本更新', '从 GitHub Release 更新主控并批量升级 Agent'],
   }
@@ -290,7 +293,9 @@ function ServerDetail({ agent, tab, setTab, events, onBack, onRename, onSaved }:
   }, [agent.id])
 	const items: { id: DetailTab; label: string; icon: typeof Activity }[] = [
 		{ id: 'overview', label: '运行概览', icon: Activity },
+		{ id: 'metrics', label: '历史指标', icon: CircleGauge },
 		{ id: 'protection', label: '防护设置', icon: ShieldCheck },
+		{ id: 'bans', label: 'IP 封禁', icon: ShieldBan },
 		{ id: 'services', label: '服务与端口', icon: Radio },
 		{ id: 'security', label: '连接安全', icon: LockKeyhole },
 		{ id: 'events', label: '安全事件', icon: FileClock },
@@ -304,11 +309,70 @@ function ServerDetail({ agent, tab, setTab, events, onBack, onRename, onSaved }:
     </header>
     <nav className="detail-tabs" aria-label="服务器详情导航">{items.map(item => <button key={item.id} className={tab === item.id ? 'active' : ''} onClick={() => { if (item.id === tab || canLeaveProtection()) setTab(item.id) }}><item.icon size={17} />{item.label}{item.id === 'protection' && policyDirty && <i className="dirty-dot" aria-label="有未保存修改" />}</button>)}</nav>
     {tab === 'overview' && <ServerOverview agent={agent} policy={policy} />}
+	{tab === 'metrics' && <HistoricalMetrics agent={agent} />}
     {tab === 'protection' && (policyLoading ? <div className="panel loading-panel"><RefreshCw className="spin" size={22} />正在读取服务器防护设置...</div> : policyError ? <div className="alert-strip"><AlertTriangle size={18} />{policyError}</div> : <ProtectionEditor agent={agent} initialPolicy={policy} onDirtyChange={setPolicyDirty} onSaved={saved => { setPolicy(saved); onSaved() }} />)}
+	{tab === 'bans' && <IPBanCenter agent={agent} hasPolicy={Boolean(policy)} />}
 	{tab === 'services' && <ServicePorts agent={agent} />}
 	{tab === 'security' && <AgentSecurity agent={agent} onChanged={onSaved} />}
 	{tab === 'events' && <Events events={events} agents={[agent]} />}
   </div>
+}
+
+type MetricRange = '1h' | '6h' | '24h' | '7d' | '30d'
+type ChartSeries = { label: string; className: string; value: (point: MetricPoint) => number; format: (value: number) => string }
+
+function HistoricalMetrics({ agent }: { agent: Agent }) {
+	const [range, setRange] = useState<MetricRange>('24h')
+	const [points, setPoints] = useState<MetricPoint[]>([])
+	const [loading, setLoading] = useState(true)
+	const [error, setError] = useState('')
+	const load = useCallback(async () => {
+		setLoading(true); setError('')
+		try {
+			const result = await api<{ points: MetricPoint[] }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/metrics?range=${range}`)
+			setPoints(result.points || [])
+		} catch (err) { setError((err as Error).message) }
+		finally { setLoading(false) }
+	}, [agent.id, range])
+	useEffect(() => { void load() }, [load])
+	const latest = points.at(-1)
+	const ranges: { value: MetricRange; label: string }[] = [{ value: '1h', label: '1小时' }, { value: '6h', label: '6小时' }, { value: '24h', label: '24小时' }, { value: '7d', label: '7天' }, { value: '30d', label: '30天' }]
+	return <section className="metrics-history">
+		<div className="section-toolbar metrics-toolbar"><div><h2>历史指标</h2><p>按分钟保存，最长保留30天；长时间范围由主控自动聚合</p></div><div className="metric-range" role="group" aria-label="历史指标时间范围">{ranges.map(item => <button key={item.value} className={range === item.value ? 'active' : ''} onClick={() => setRange(item.value)}>{item.label}</button>)}</div><button className="icon-button" onClick={() => void load()} title="刷新历史指标" aria-label="刷新历史指标"><RefreshCw size={17} className={loading ? 'spin' : ''} /></button></div>
+		{error && <div className="alert-strip"><AlertTriangle size={18} />{error}</div>}
+		{latest && <div className="history-latest"><span><small>CPU</small><strong>{latest.cpu_usage.toFixed(1)}%</strong></span><span><small>内存</small><strong>{latest.memory_percent.toFixed(1)}%</strong></span><span><small>接收</small><strong>{formatNetworkRate(latest.receive_rate)}</strong></span><span><small>ESTABLISHED</small><strong>{formatNumber(latest.established)}</strong></span><span><small>Conntrack</small><strong>{formatNumber(latest.conntrack)}</strong></span><span><small>区间丢弃</small><strong>{formatNumber(points.reduce((sum, point) => sum + point.dropped_delta, 0))}</strong></span></div>}
+		{!loading && points.length === 0 ? <div className="panel history-empty"><Empty text="收到下一次 Agent 遥测后会开始生成历史指标" /></div> : <div className="history-chart-grid">
+			<HistoryChart title="CPU 与内存" points={points} maximum={100} series={[{ label: 'CPU', className: 'coral', value: point => point.cpu_usage, format: value => `${value.toFixed(1)}%` }, { label: '内存', className: 'blue', value: point => point.memory_percent, format: value => `${value.toFixed(1)}%` }]} />
+			<HistoryChart title="网络速率" points={points} series={[{ label: '接收', className: 'green', value: point => point.receive_rate, format: formatNetworkRate }, { label: '发送', className: 'amber', value: point => point.transmit_rate, format: formatNetworkRate }]} />
+			<HistoryChart title="TCP 连接状态" points={points} series={[{ label: 'ESTABLISHED', className: 'green', value: point => point.established, format: formatNumber }, { label: 'TIME_WAIT', className: 'blue', value: point => point.time_wait, format: formatNumber }, { label: 'SYN_RECV', className: 'red', value: point => point.syn_recv, format: formatNumber }]} />
+			<HistoryChart title="Conntrack 使用" points={points} maximum={100} series={[{ label: '使用率', className: 'amber', value: point => point.conntrack_percent, format: value => `${value.toFixed(1)}%` }]} />
+			<HistoryChart title="防护丢弃增量" points={points} series={[{ label: '丢弃', className: 'red', value: point => point.dropped_delta, format: formatNumber }]} />
+		</div>}
+	</section>
+}
+
+function HistoryChart({ title, points, series, maximum }: { title: string; points: MetricPoint[]; series: ChartSeries[]; maximum?: number }) {
+	const [hovered, setHovered] = useState<number | null>(null)
+	const width = 720, height = 190, top = 14, bottom = 28
+	const values = series.flatMap(item => points.map(item.value))
+	const peakValue = Math.max(0, ...values)
+	const maxValue = maximum || Math.max(1, peakValue)
+	const x = (index: number) => points.length <= 1 ? width / 2 : index / (points.length - 1) * width
+	const y = (value: number) => top + (height - top - bottom) * (1 - Math.min(1, Math.max(0, value / maxValue)))
+	const active = hovered == null ? points.length - 1 : hovered
+	const point = points[active]
+	return <article className="panel history-chart">
+		<header><h3>{title}</h3><div>{series.map(item => <span key={item.label}><i className={item.className} />{item.label}</span>)}</div></header>
+		<div className="chart-stage" onPointerMove={event => { if (!points.length) return; const bounds = event.currentTarget.getBoundingClientRect(); setHovered(Math.max(0, Math.min(points.length - 1, Math.round((event.clientX - bounds.left) / bounds.width * (points.length - 1))))) }} onPointerLeave={() => setHovered(null)}>
+			<svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}趋势图`} preserveAspectRatio="none">
+				{[0, .25, .5, .75, 1].map(value => <line key={value} className="chart-grid-line" x1="0" x2={width} y1={y(maxValue * value)} y2={y(maxValue * value)} />)}
+				{series.map(item => <polyline key={item.label} className={`chart-line ${item.className}`} points={points.map((current, index) => `${x(index)},${y(item.value(current))}`).join(' ')} />)}
+				{point && <line className="chart-cursor" x1={x(active)} x2={x(active)} y1={top} y2={height - bottom} />}
+			</svg>
+			{point && <div className="chart-tooltip" style={{ left: `${points.length <= 1 ? 50 : active / (points.length - 1) * 100}%` }}><time>{formatMetricTime(point.timestamp)}</time>{series.map(item => <span key={item.label}><i className={item.className} />{item.label}<strong>{item.format(item.value(point))}</strong></span>)}{point.emergency && <b>应急保护中</b>}</div>}
+		</div>
+		<footer><time>{points[0] ? formatMetricTime(points[0].timestamp) : '-'}</time><strong>峰值 {series[0]?.format(peakValue) || '-'}</strong><time>{points.at(-1) ? formatMetricTime(points.at(-1)!.timestamp) : '-'}</time></footer>
+	</article>
 }
 
 function AgentSecurity({ agent, onChanged }: { agent: Agent; onChanged: () => void }) {
@@ -320,6 +384,7 @@ function AgentSecurity({ agent, onChanged }: { agent: Agent; onChanged: () => vo
 	const [rotationBaseline, setRotationBaseline] = useState<string | null>(null)
 	const [pairing, setPairing] = useState<{ install_command: string; expires_in_minutes: number } | null>(null)
 	const [copied, setCopied] = useState(false)
+	const [diagnosticBusy, setDiagnosticBusy] = useState(false)
 	useEffect(() => {
 		if (rotationBaseline === null || !agent.credential_rotated_at || agent.credential_rotated_at === rotationBaseline) return
 		if (agent.status === 'online' && agent.secure_channel && agent.credential_state === 'active') {
@@ -354,14 +419,34 @@ function AgentSecurity({ agent, onChanged }: { agent: Agent; onChanged: () => vo
 		if (!pairing) return
 		await navigator.clipboard.writeText(pairing.install_command); setCopied(true); window.setTimeout(() => setCopied(false), 1500)
 	}
+	const downloadDiagnostics = async () => {
+		setDiagnosticBusy(true); setError(''); setMessage('')
+		try {
+			const response = await fetch(`/api/admin/agents/${encodeURIComponent(agent.id)}/diagnostics`, { credentials: 'same-origin' })
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+				throw new Error(body.error || `HTTP ${response.status}`)
+			}
+			const blob = await response.blob()
+			const disposition = response.headers.get('Content-Disposition') || ''
+			const filename = disposition.match(/filename="([^"]+)"/)?.[1] || 'mmwx-guard-diagnostic.zip'
+			const url = URL.createObjectURL(blob)
+			const link = document.createElement('a')
+			link.href = url; link.download = filename; link.click()
+			window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+			setMessage('诊断包已生成并下载')
+		} catch (err) { setError((err as Error).message) }
+		finally { setDiagnosticBusy(false) }
+	}
 	return <div className="security-page">
 		{error && <div className="alert-strip"><AlertTriangle size={18} />{error}<button onClick={() => setError('')} aria-label="关闭"><X size={16} /></button></div>}
 		{message && <div className="success-strip"><Check size={18} />{message}</div>}
 		<section className="detail-grid security-grid">
-			<article className="panel detail-panel security-panel"><PanelHeader icon={<LockKeyhole size={21} />} title="主控信任" subtitle="Agent 固定并验证主控身份" /><dl className="detail-list"><div><dt>身份签名</dt><dd><SecurityState ok={Boolean(agent.controller_verified_at)} okText="已验证" waitingText="等待 Agent 验证" /></dd></div><div><dt>端到端通道</dt><dd><SecurityState ok={agent.secure_channel} okText="X25519 + AES-GCM" waitingText="TLS 兼容模式" /></dd></div><div><dt>主控指纹</dt><dd className="mono fingerprint">{shortFingerprint(agent.controller_key_fingerprint)}</dd></div><div><dt>验证时间</dt><dd>{formatTime(agent.controller_verified_at || '')}</dd></div></dl></article>
+			<article className="panel detail-panel security-panel"><PanelHeader icon={<LockKeyhole size={21} />} title="主控信任" subtitle="Agent 固定并验证主控身份" /><dl className="detail-list"><div><dt>身份签名</dt><dd><SecurityState ok={Boolean(agent.controller_verified_at)} okText="已验证" waitingText="等待 Agent 验证" /></dd></div><div><dt>端到端通道</dt><dd><SecurityState ok={agent.secure_channel} okText="X25519 + AES-GCM" waitingText="TLS 兼容模式" /></dd></div><div><dt>传输方式</dt><dd>{agent.status !== 'online' ? '-' : agent.connection_transport === 'https_pull' ? 'HTTPS Push/Pull' : 'WebSocket'}</dd></div><div><dt>主控指纹</dt><dd className="mono fingerprint">{shortFingerprint(agent.controller_key_fingerprint)}</dd></div><div><dt>验证时间</dt><dd>{formatTime(agent.controller_verified_at || '')}</dd></div></dl></article>
 			<article className="panel detail-panel security-panel"><PanelHeader icon={<KeyRound size={21} />} title="Agent 凭据与网络" subtitle="独立凭据、主动双栈探测与连接来源" /><dl className="detail-list"><div><dt>凭据状态</dt><dd><CredentialState state={agent.credential_state} /></dd></div><div><dt>最近认证</dt><dd>{formatTime(agent.last_authenticated_at || '')}</dd></div><div><dt>最近轮换</dt><dd>{formatTime(agent.credential_rotated_at || '')}</dd></div><div><dt>公网 IPv4</dt><dd className="mono">{agent.ipv4_address || '-'}</dd></div><div><dt>公网 IPv6</dt><dd className="mono">{agent.ipv6_address || '-'}</dd></div><div><dt>控制连接来源</dt><dd className="mono">{agent.ip_address || '-'}</dd></div><div><dt>地址探测时间</dt><dd>{formatTime(agent.address_updated_at || '')}</dd></div></dl></article>
 		</section>
-		<section className="settings-section security-actions"><div className="settings-heading"><div><h2>凭据操作</h2><p>轮换保留现有策略；撤销后必须重新配对</p></div></div><div className="security-action-list"><div><span><strong>轮换凭据</strong><small>在线 Agent 通过加密通道自动换钥</small></span><button className="secondary-button" disabled={busy || agent.status !== 'online' || !agent.secure_channel || agent.credential_state === 'revoked'} onClick={() => setRotateOpen(true)}><RotateCw size={17} />立即轮换</button></div><div><span><strong>重新配对</strong><small>生成绑定当前机器的一次性安装命令</small></span><button className="secondary-button" disabled={busy} onClick={() => void createPairing()}><Link2 size={17} />生成命令</button></div><div><span><strong>撤销访问</strong><small>立即断开 Agent 并拒绝旧凭据</small></span><button className="danger-button" disabled={busy || agent.credential_state === 'revoked'} onClick={() => setRevokeOpen(true)}><Link2Off size={17} />撤销凭据</button></div></div></section>
+			<section className="settings-section security-actions"><div className="settings-heading"><div><h2>凭据操作</h2><p>轮换保留现有策略；撤销后必须重新配对</p></div></div><div className="security-action-list"><div><span><strong>轮换凭据</strong><small>在线 Agent 通过加密通道自动换钥</small></span><button className="secondary-button" disabled={busy || agent.status !== 'online' || !agent.secure_channel || agent.credential_state === 'revoked'} onClick={() => setRotateOpen(true)}><RotateCw size={17} />立即轮换</button></div><div><span><strong>重新配对</strong><small>生成绑定当前机器的一次性安装命令</small></span><button className="secondary-button" disabled={busy} onClick={() => void createPairing()}><Link2 size={17} />生成命令</button></div><div><span><strong>撤销访问</strong><small>立即断开 Agent 并拒绝旧凭据</small></span><button className="danger-button" disabled={busy || agent.credential_state === 'revoked'} onClick={() => setRevokeOpen(true)}><Link2Off size={17} />撤销凭据</button></div></div></section>
+			<section className="settings-section security-actions"><div className="settings-heading"><div><h2>诊断与支持</h2><p>仅导出只读状态并自动脱敏，不读取数据库、密钥或环境变量</p></div></div><div className="security-action-list"><div><span><strong>服务器诊断包</strong><small>包含自动检查、遥测、策略、端口健康和最近任务事件</small></span><button className="secondary-button" disabled={diagnosticBusy} onClick={() => void downloadDiagnostics()}><Download size={17} />{diagnosticBusy ? '正在生成...' : '下载诊断包'}</button></div></div></section>
 		{pairing && <section className="settings-section pairing-result"><div className="settings-heading"><div><h2>一次性重新配对命令</h2><p>{pairing.expires_in_minutes} 分钟内有效，仅接受原机器标识</p></div><button className="primary-button" onClick={() => void copyPairing()}>{copied ? <Check size={17} /> : <Copy size={17} />}{copied ? '已复制' : '复制命令'}</button></div><pre>{pairing.install_command}</pre></section>}
 		{rotateOpen && <ConfirmDialog title="轮换 Agent 凭据" description="新凭据会经端到端加密通道下发，Agent 随后自动重连，现有防护规则不会中断。" confirmLabel="确认轮换" busy={busy} onClose={() => setRotateOpen(false)} onConfirm={rotate} />}
 		{revokeOpen && <ConfirmDialog title="撤销 Agent 凭据" description="当前连接会立即断开。恢复连接需要在原服务器执行一次性重新配对命令。" confirmLabel="撤销凭据" busy={busy} danger onClose={() => setRevokeOpen(false)} onConfirm={revoke} />}
@@ -380,7 +465,7 @@ function ServerOverview({ agent, policy }: { agent: Agent; policy: Policy | null
 	      <Metric icon={<Activity />} title="实时速率" value={telemetry?.network ? `收 ${formatNetworkRate(telemetry.network.receive_bytes_per_second)}` : '-'} detail={telemetry?.network ? `发 ${formatNetworkRate(telemetry.network.transmit_bytes_per_second)}` : '等待 Agent 上报'} tone="coral" />
     </section>
     <section className="detail-grid">
-      <article className="panel detail-panel"><PanelHeader icon={<ShieldCheck size={21} />} title="当前防护" subtitle="只作用于这台服务器" /><dl className="detail-list"><div><dt>状态</dt><dd>{telemetry?.protected ? '已启用' : '未启用'}</dd></div><div><dt>保护端口</dt><dd className="mono">{protectedPorts.join(', ') || '-'}</dd></div><div><dt>整机新连接</dt><dd>{policy?.global.enabled ? `${policy.global.rate}/s · 突发 ${policy.global.burst}` : '关闭'}</dd></div><div><dt>累计拦截</dt><dd className="danger-text">{formatNumber(telemetry?.dropped_total || 0)}</dd></div></dl></article>
+	  <article className="panel detail-panel"><PanelHeader icon={<ShieldCheck size={21} />} title="当前防护" subtitle="只作用于这台服务器" /><dl className="detail-list"><div><dt>状态</dt><dd>{telemetry?.adaptive?.emergency ? <span className="emergency-label"><AlertTriangle size={14} />应急保护中</span> : telemetry?.protected ? '已启用' : '未启用'}</dd></div><div><dt>保护端口</dt><dd className="mono">{protectedPorts.join(', ') || '-'}</dd></div><div><dt>整机新连接</dt><dd>{policy?.global.enabled ? `${policy.global.rate}/s · 突发 ${policy.global.burst}` : '关闭'}</dd></div><div><dt>自适应保护</dt><dd>{policy?.adaptive.enabled ? telemetry?.adaptive?.emergency ? telemetry.adaptive.reason || '压力超过阈值' : '监测中' : '关闭'}</dd></div><div><dt>累计拦截</dt><dd className="danger-text">{formatNumber(telemetry?.dropped_total || 0)}</dd></div></dl></article>
 	      <article className="panel detail-panel"><PanelHeader icon={<Zap size={21} />} title="当前入站来源" subtitle="按入站连接数排序" />{telemetry?.top_sources?.length ? <div className="mini-source-list">{telemetry.top_sources.slice(0, 6).map(source => <div key={source.ip}><span className="mono">{source.ip}</span><strong>{formatNumber(source.connections)}</strong></div>)}</div> : <Empty text="暂无入站连接来源" />}</article>
     </section>
   </>
@@ -441,13 +526,13 @@ function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { ag
     if (validationError) { setError(validationError); return }
     setBusy(true)
     try {
-      const result = await api<{ policy: Policy; message: string }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/protection`, { method: 'PUT', body: JSON.stringify(policy) })
-      setPolicy(result.policy); setSavedSnapshot(JSON.stringify(result.policy)); setMessage(dirty ? '配置已保存并成功下发到当前服务器' : '当前配置已重新下发到服务器'); onSaved(result.policy)
+	  const result = await api<{ policy: Policy; message: string; queued?: boolean }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/protection`, { method: 'PUT', body: JSON.stringify(policy) })
+	  setPolicy(result.policy); setSavedSnapshot(JSON.stringify(result.policy)); setMessage(result.message); onSaved(result.policy)
     } catch (err) { setError(`配置未下发：${(err as Error).message}`) }
     finally { setBusy(false) }
   }
   const applyStatus = agent.status !== 'online'
-    ? { tone: 'offline', text: '服务器离线，暂时无法下发' }
+	? { tone: 'offline', text: '服务器离线，保存后会进入任务队列并在上线时自动下发' }
     : error
       ? { tone: 'error', text: error }
       : dirty
@@ -472,21 +557,122 @@ function ProtectionEditor({ agent, initialPolicy, onDirtyChange, onSaved }: { ag
       <div className="settings-heading"><div><h2>整机与可信入口</h2><p>可信前置地址不受速率限制，管理端口始终排除</p></div><label className="switch-field"><input type="checkbox" checked={policy.global.enabled} onChange={event => setPolicy(current => ({ ...current, global: { ...current.global, enabled: event.target.checked } }))} /><span>整机规则</span></label></div>
       <div className="form-grid settings-fields"><label><span>策略名称</span><input value={policy.name} maxLength={80} onChange={event => setPolicy(current => ({ ...current, name: event.target.value }))} required /></label><NumberField label="整机 SYN 速率 /s" value={policy.global.rate} onChange={value => setPolicy(current => ({ ...current, global: { ...current.global, rate: value } }))} /><NumberField label="整机突发额度" value={policy.global.burst} onChange={value => setPolicy(current => ({ ...current, global: { ...current.global, burst: value } }))} /><label><span>永久排除端口</span><input value={policy.global.exempt_ports.join(',')} onChange={event => setPolicy(current => ({ ...current, global: { ...current.global, exempt_ports: event.target.value.split(',').map(Number).filter(Boolean) } }))} placeholder="22,48357" /></label><label className="full"><span>可信前置 IP / CIDR</span><textarea value={policy.trusted_cidrs.join('\n')} onChange={event => setPolicy(current => ({ ...current, trusted_cidrs: event.target.value.split(/[\s,]+/).filter(Boolean) }))} placeholder="每行一个，例如 212.17.236.133/32" /></label></div>
     </section>
-    <div className="settings-actions"><span className={`apply-status ${applyStatus.tone}`} role={error ? 'alert' : 'status'} aria-live="polite">{applyStatus.text}</span><button className="primary-button" disabled={busy || agent.status !== 'online'}>{dirty ? <Save size={17} /> : <RefreshCw size={17} />}{busy ? '正在下发...' : dirty ? '保存并下发' : '重新下发'}</button></div>
+	<section className="settings-section">
+	  <div className="settings-heading"><div><h2>自适应应急保护</h2><p>连续两次超过任一阈值后收紧新建连接，稳定一分钟后自动恢复</p></div><label className="switch-field"><input type="checkbox" checked={policy.adaptive.enabled} onChange={event => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, enabled: event.target.checked } }))} /><span>自动应急</span></label></div>
+	  <div className="form-grid settings-fields adaptive-fields"><NumberField label="Conntrack 触发 %" value={policy.adaptive.trigger_conntrack_percent} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, trigger_conntrack_percent: value } }))} /><NumberField label="Conntrack 恢复 %" value={policy.adaptive.recover_conntrack_percent} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, recover_conntrack_percent: value } }))} /><NumberField label="连接数触发" value={policy.adaptive.trigger_connections} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, trigger_connections: value } }))} /><NumberField label="连接数恢复" value={policy.adaptive.recover_connections} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, recover_connections: value } }))} /><NumberField label="SYN 堆积触发" value={policy.adaptive.trigger_syn} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, trigger_syn: value } }))} /><NumberField label="SYN 堆积恢复" value={policy.adaptive.recover_syn} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, recover_syn: value } }))} /><NumberField label="应急新建速率 /s" value={policy.adaptive.emergency_rate} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, emergency_rate: value } }))} /><NumberField label="应急突发额度" value={policy.adaptive.emergency_burst} onChange={value => setPolicy(current => ({ ...current, adaptive: { ...current.adaptive, emergency_burst: value } }))} /></div>
+	</section>
+	<PolicyHistoryPanel agent={agent} currentRevision={policy.revision} disabled={dirty || busy} onRestored={restored => { setPolicy(restored); setSavedSnapshot(JSON.stringify(restored)); setSelectedSources(discovered.filter(source => restored.ports.some(port => port.port === source.port)).map(source => source.key)); setMessage(`已恢复并应用 REV ${restored.revision}`); onSaved(restored) }} />
+	<div className="settings-actions"><span className={`apply-status ${applyStatus.tone}`} role={error ? 'alert' : 'status'} aria-live="polite">{applyStatus.text}</span><button className="primary-button" disabled={busy}>{dirty ? <Save size={17} /> : <RefreshCw size={17} />}{busy ? '正在提交...' : agent.status !== 'online' ? '保存并排队' : dirty ? '保存并下发' : '重新下发'}</button></div>
   </form>
+}
+
+function PolicyHistoryPanel({ agent, currentRevision, disabled, onRestored }: { agent: Agent; currentRevision: number; disabled: boolean; onRestored: (policy: Policy) => void }) {
+	const [history, setHistory] = useState<PolicyHistory[]>([])
+	const [loading, setLoading] = useState(true)
+	const [busy, setBusy] = useState(false)
+	const [error, setError] = useState('')
+	const [restoreItem, setRestoreItem] = useState<PolicyHistory | null>(null)
+	const load = useCallback(async () => {
+		setLoading(true); setError('')
+		try { setHistory((await api<{ history: PolicyHistory[] }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/policy-history`)).history || []) }
+		catch (err) { setError((err as Error).message) }
+		finally { setLoading(false) }
+	}, [agent.id])
+	useEffect(() => { void load() }, [load, currentRevision])
+	const restore = async () => {
+		if (!restoreItem) return
+		setBusy(true); setError('')
+		try {
+			const result = await api<{ policy: Policy }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/policy-history/${restoreItem.id}/restore`, { method: 'POST', body: '{}' })
+			setRestoreItem(null); onRestored(result.policy); await load()
+		} catch (err) { setError((err as Error).message); setRestoreItem(null) }
+		finally { setBusy(false) }
+	}
+	return <section className="settings-section policy-history"><div className="settings-heading"><div><h2>策略历史</h2><p>只保留成功应用的最近100版，恢复旧版会生成新的修订号</p></div><button type="button" className="icon-button" onClick={() => void load()} title="刷新策略历史" aria-label="刷新策略历史"><RefreshCw size={17} className={loading ? 'spin' : ''} /></button></div>{error && <div className="history-error"><AlertTriangle size={16} />{error}</div>}<div className="table-wrap"><table><thead><tr><th>版本</th><th>来源</th><th>配置摘要</th><th>操作人</th><th>时间</th><th>操作</th></tr></thead><tbody>{history.map(item => <tr key={item.id}><td className="mono"><strong>REV {item.revision}</strong></td><td>{item.source === 'restored' ? '历史恢复' : '手工保存'}</td><td>{item.policy.ports.filter(port => port.enabled).length} 个端口 · 整机 {item.policy.global.enabled ? `${item.policy.global.rate}/s` : '关闭'} · 自适应 {item.policy.adaptive.enabled ? '开启' : '关闭'}</td><td>{item.author || '-'}</td><td>{formatTime(item.created_at)}</td><td><button type="button" className="secondary-button history-restore" disabled={disabled || busy || item.revision === currentRevision || agent.status !== 'online'} onClick={() => setRestoreItem(item)}><RotateCw size={15} />恢复</button></td></tr>)}{!loading && history.length === 0 && <tr><td colSpan={6}><Empty text="下一次成功保存后会生成第一份策略历史" /></td></tr>}</tbody></table></div>{restoreItem && <ConfirmDialog title="恢复历史策略" description={`确定把 REV ${restoreItem.revision} 的配置恢复到这台服务器吗？恢复后会生成新的修订版本。`} confirmLabel="恢复并下发" busy={busy} onClose={() => setRestoreItem(null)} onConfirm={restore} />}</section>
+}
+
+function IPBanCenter({ agent, hasPolicy }: { agent: Agent; hasPolicy: boolean }) {
+	const [bans, setBans] = useState<IPBan[]>([])
+	const [loading, setLoading] = useState(true)
+	const [busy, setBusy] = useState(false)
+	const [error, setError] = useState('')
+	const [message, setMessage] = useState('')
+	const [address, setAddress] = useState('')
+	const [reason, setReason] = useState('')
+	const [duration, setDuration] = useState(60)
+	const load = useCallback(async () => {
+		setLoading(true); setError('')
+		try { setBans((await api<{ bans: IPBan[] }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/bans`)).bans || []) }
+		catch (err) { setError((err as Error).message) }
+		finally { setLoading(false) }
+	}, [agent.id])
+	useEffect(() => { void load() }, [load])
+	const submit = async (event: FormEvent) => {
+		event.preventDefault(); setBusy(true); setError(''); setMessage('')
+		try {
+			const result = await api<{ message: string }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/bans`, { method: 'POST', body: JSON.stringify({ address, reason, duration_minutes: duration }) })
+			setAddress(''); setReason(''); setMessage(result.message); await load()
+		} catch (err) { setError((err as Error).message) }
+		finally { setBusy(false) }
+	}
+	const remove = async (ban: IPBan) => {
+		setBusy(true); setError(''); setMessage('')
+		try {
+			const result = await api<{ message: string }>(`/api/admin/agents/${encodeURIComponent(agent.id)}/bans/${ban.id}`, { method: 'DELETE' })
+			setMessage(result.message); await load()
+		} catch (err) { setError((err as Error).message) }
+		finally { setBusy(false) }
+	}
+	return <div className="ban-page">
+		{!hasPolicy && <div className="info-strip"><ShieldCheck size={18} /><span><strong>需要先保存防护策略</strong><small>黑名单由独立 nftables 集合承载，但需要基础防护表已经创建。</small></span></div>}
+		{error && <div className="alert-strip"><AlertTriangle size={18} />{error}</div>}
+		{message && <div className="success-strip"><Check size={18} />{message}</div>}
+		<section className="settings-section"><div className="settings-heading"><div><h2>新增封禁</h2><p>可信前置地址会被拒绝，避免误封入口机器</p></div></div><form className="ban-form" onSubmit={submit}><label><span>IPv4 / IPv6</span><input value={address} onChange={event => setAddress(event.target.value)} placeholder="例如 203.0.113.8" required /></label><label><span>封禁时长</span><select value={duration} onChange={event => setDuration(Number(event.target.value))}><option value={10}>10 分钟</option><option value={60}>1 小时</option><option value={1440}>24 小时</option><option value={10080}>7 天</option><option value={0}>永久</option></select></label><label><span>原因</span><input value={reason} maxLength={200} onChange={event => setReason(event.target.value)} placeholder="可选" /></label><button className="danger-button" disabled={busy || !hasPolicy || !address.trim()}><ShieldBan size={17} />{busy ? '正在提交...' : '加入黑名单'}</button></form></section>
+		<section className="panel management-panel"><div className="section-toolbar"><div><h2>当前封禁 ({bans.length})</h2><p>临时封禁到期后自动清理，永久封禁需手动解除</p></div><button className="icon-button" onClick={() => void load()} title="刷新封禁列表" aria-label="刷新封禁列表"><RefreshCw size={17} className={loading ? 'spin' : ''} /></button></div><div className="table-wrap"><table><thead><tr><th>IP 地址</th><th>类型</th><th>原因</th><th>创建时间</th><th>到期时间</th><th>状态</th><th>操作</th></tr></thead><tbody>{bans.map(ban => <tr key={ban.id}><td className="mono"><strong>{ban.address}</strong></td><td>{ban.expires_at ? '临时' : '永久'}</td><td>{ban.reason || '-'}</td><td>{formatTime(ban.created_at)}</td><td>{ban.expires_at ? formatTime(ban.expires_at) : '不会到期'}</td><td>{ban.applied ? <span className="rule-state active">已应用</span> : <span className="rule-state" title={ban.last_error}>等待同步</span>}</td><td><div className="row-actions"><button className="danger" disabled={busy} onClick={() => void remove(ban)} title="解除封禁" aria-label={`解除 ${ban.address} 封禁`}><Trash2 size={17} /></button></div></td></tr>)}{!loading && bans.length === 0 && <tr><td colSpan={7}><Empty text="当前没有手工封禁的IP" /></td></tr>}</tbody></table></div></section>
+	</div>
 }
 
 function ServicePorts({ agent }: { agent: Agent }) {
   const mmw = agent.telemetry?.integrations?.mmw
   const forwardx = agent.telemetry?.integrations?.forwardx
+	const health = new Map((agent.telemetry?.port_health || []).map(result => [result.key, result]))
   return <div className="service-sections">
     <section className="panel service-panel"><PanelHeader icon={<Server size={21} />} title="妙妙屋节点端口" subtitle={mmw ? `Agent ${mmw.active ? '运行中' : '未运行'} · ${mmw.nodes?.length || 0} 个节点入站` : '未发现妙妙屋 Agent'} />
-      <div className="table-wrap"><table><thead><tr><th>节点标签</th><th>协议</th><th>传输</th><th>安全层</th><th>监听</th><th>状态</th></tr></thead><tbody>{mmw?.nodes?.map(node => <tr key={`${node.tag}-${node.port}`}><td><strong>{node.tag || `节点 ${node.port}`}</strong></td><td>{node.protocol.toUpperCase()}</td><td>{(node.network || 'tcp').toUpperCase()}</td><td>{node.security?.toUpperCase() || '-'}</td><td className="mono">{formatListen(node.listen, node.port)}</td><td><span className={`rule-state ${node.active ? 'active' : ''}`}>{node.active ? '运行中' : '已配置，未运行'}</span></td></tr>)}{!mmw?.nodes?.length && <tr><td colSpan={6}><Empty text="未发现妙妙屋 Xray 节点入站" /></td></tr>}</tbody></table></div>
+      <div className="table-wrap"><table><thead><tr><th>节点标签</th><th>协议</th><th>传输</th><th>安全层</th><th>监听</th><th>状态</th><th>连通性</th></tr></thead><tbody>{mmw?.nodes?.map(node => <tr key={`${node.tag}-${node.port}`}><td><strong>{node.tag || `节点 ${node.port}`}</strong></td><td>{node.protocol.toUpperCase()}</td><td>{(node.network || 'tcp').toUpperCase()}</td><td>{node.security?.toUpperCase() || '-'}</td><td className="mono">{formatListen(node.listen, node.port)}</td><td><span className={`rule-state ${node.active ? 'active' : ''}`}>{node.active ? '运行中' : '已配置，未运行'}</span></td><td><PortHealthState health={health.get(`mmw:${node.tag || 'node'}:${node.port}`)} /></td></tr>)}{!mmw?.nodes?.length && <tr><td colSpan={7}><Empty text="未发现妙妙屋 Xray 节点入站" /></td></tr>}</tbody></table></div>
     </section>
     <section className="panel service-panel"><PanelHeader icon={<Cable size={21} />} title="ForwardX 转发规则" subtitle={forwardx ? `Agent ${forwardx.active ? '运行中' : '未运行'} · ${forwardx.rules.length} 条规则` : '未发现 ForwardX Agent'} />
-      <div className="table-wrap"><table><thead><tr><th>规则</th><th>协议</th><th>入口</th><th>目标</th><th>状态</th></tr></thead><tbody>{forwardx?.rules.map(rule => <tr key={rule.id}><td><strong>{rule.id}</strong></td><td>{rule.protocol.toUpperCase()}</td><td className="mono">{rule.listen}</td><td className="mono">{rule.remote}</td><td><span className={`rule-state ${rule.active ? 'active' : ''}`}>{rule.active ? '运行中' : '未运行'}</span></td></tr>)}{!forwardx?.rules.length && <tr><td colSpan={5}><Empty text="未发现 ForwardX 转发规则" /></td></tr>}</tbody></table></div>
+      <div className="table-wrap"><table><thead><tr><th>规则</th><th>协议</th><th>入口</th><th>目标</th><th>状态</th><th>连通性</th></tr></thead><tbody>{forwardx?.rules.map(rule => <tr key={rule.id}><td><strong>{rule.id}</strong></td><td>{rule.protocol.toUpperCase()}</td><td className="mono">{rule.listen}</td><td className="mono">{rule.remote}</td><td><span className={`rule-state ${rule.active ? 'active' : ''}`}>{rule.active ? '运行中' : '未运行'}</span></td><td><PortHealthState health={health.get(`forwardx:${rule.id}:${rule.listen_port}`)} /></td></tr>)}{!forwardx?.rules.length && <tr><td colSpan={6}><Empty text="未发现 ForwardX 转发规则" /></td></tr>}</tbody></table></div>
     </section>
   </div>
+}
+
+function PortHealthState({ health }: { health?: PortHealth }) {
+	if (!health) return <span className="port-health waiting" title="等待 Agent 完成首次端口探测"><Activity size={14} />等待探测</span>
+	if (health.status === 'unsupported') return <span className="port-health unsupported" title="仅对 TCP 监听执行连通性探测"><Network size={14} />非 TCP</span>
+	if (health.status === 'healthy') return <span className="port-health healthy" title={`探测时间：${formatTime(health.checked_at)}`}><Check size={14} />可连接 · {health.latency_ms || 1} ms</span>
+	return <span className="port-health unhealthy" title={`${health.error || 'TCP 连接失败'} · ${formatTime(health.checked_at)}`}><AlertTriangle size={14} />不可连接</span>
+}
+
+function TaskCenter({ agents }: { agents: Agent[] }) {
+	const [tasks, setTasks] = useState<AgentTask[]>([])
+	const [loading, setLoading] = useState(true)
+	const [error, setError] = useState('')
+	const [state, setState] = useState('all')
+	const names = Object.fromEntries(agents.map(agent => [agent.id, agent.name]))
+	const load = useCallback(async (silent = false) => {
+		if (!silent) setLoading(true)
+		try { setTasks((await api<{ tasks: AgentTask[] }>('/api/admin/tasks')).tasks || []); setError('') }
+		catch (err) { setError((err as Error).message) }
+		finally { if (!silent) setLoading(false) }
+	}, [])
+	useEffect(() => { void load(); const timer = window.setInterval(() => void load(true), 5000); return () => window.clearInterval(timer) }, [load])
+	const action = async (task: AgentTask, command: 'retry' | 'cancel') => {
+		try { await api(`/api/admin/tasks/${task.id}/${command}`, { method: 'POST', body: '{}' }); await load() }
+		catch (err) { setError((err as Error).message) }
+	}
+	const visible = state === 'all' ? tasks : tasks.filter(task => task.state === state)
+	const stateLabels: Record<string, string> = { queued: '等待执行', running: '执行中', succeeded: '成功', failed: '失败', canceled: '已取消' }
+	return <section className="panel management-panel"><div className="section-toolbar"><div><h2>Agent 任务 ({visible.length} / {tasks.length})</h2><p>任务状态持久保存，浏览器关闭不会中断执行</p></div><button className="icon-button" onClick={() => void load()} title="刷新任务" aria-label="刷新任务"><RefreshCw size={17} className={loading ? 'spin' : ''} /></button></div>{error && <div className="alert-strip task-alert"><AlertTriangle size={17} />{error}</div>}<div className="list-controls task-controls"><label><ListFilter size={17} /><span className="sr-only">任务状态</span><select value={state} onChange={event => setState(event.target.value)}><option value="all">全部状态</option>{Object.entries(stateLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label></div><div className="table-wrap"><table><thead><tr><th>任务</th><th>服务器</th><th>状态</th><th>尝试</th><th>创建时间</th><th>完成时间</th><th>结果</th><th>操作</th></tr></thead><tbody>{visible.map(task => <tr key={task.id}><td><strong>#{task.id} · {task.kind === 'policy_deploy' ? '策略下发' : '黑名单同步'}</strong></td><td>{names[task.agent_id] || task.agent_id}</td><td><span className={`task-state ${task.state}`}>{stateLabels[task.state] || task.state}</span></td><td>{task.attempts} / 10</td><td>{formatTime(task.created_at)}</td><td>{task.finished_at ? formatTime(task.finished_at) : '-'}</td><td className={task.state === 'failed' ? 'danger-text' : ''}>{task.message || '-'}</td><td><div className="row-actions">{task.state === 'failed' && <button onClick={() => void action(task, 'retry')} title="重试" aria-label={`重试任务 ${task.id}`}><RotateCw size={17} /></button>}{task.state === 'queued' && <button className="danger" onClick={() => void action(task, 'cancel')} title="取消" aria-label={`取消任务 ${task.id}`}><X size={17} /></button>}</div></td></tr>)}{!loading && visible.length === 0 && <tr><td colSpan={8}><Empty text="没有符合条件的任务" /></td></tr>}</tbody></table></div></section>
 }
 
 function Events({ events, agents }: { events: EventItem[]; agents: Agent[] }) {
@@ -810,11 +996,11 @@ function Modal({ title, subtitle, onClose, children, wide = false, returnFocus }
 		window.addEventListener('keydown', handleKey)
 		return () => { window.clearTimeout(focusTimer); window.removeEventListener('keydown', handleKey); (returnFocus ? document.querySelector<HTMLElement>(returnFocus) : previous)?.focus() }
 	}, [])
-	return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}><section ref={dialogRef} tabIndex={-1} className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} title="关闭" aria-label="关闭"><X size={20} /></button></header><div className="modal-body">{children}</div></section></div>
+	return <div className="modal-backdrop" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}><section ref={dialogRef} tabIndex={-1} className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button type="button" className="icon-button" onClick={onClose} title="关闭" aria-label="关闭"><X size={20} /></button></header><div className="modal-body">{children}</div></section></div>
 }
 
 function ConfirmDialog({ title, description, confirmLabel, busy = false, danger = false, returnFocus, onClose, onConfirm }: { title: string; description: string; confirmLabel: string; busy?: boolean; danger?: boolean; returnFocus?: string; onClose: () => void; onConfirm: () => void | Promise<void> }) {
-		  return <Modal title={title} subtitle="请确认本次操作" returnFocus={returnFocus} onClose={busy ? () => undefined : onClose}><div className="confirm-dialog"><AlertTriangle size={24} /><p>{description}</p><div className="dialog-actions"><button data-initial-focus className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button className={danger ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => void onConfirm()}>{busy ? '正在处理...' : confirmLabel}</button></div></div></Modal>
+		  return <Modal title={title} subtitle="请确认本次操作" returnFocus={returnFocus} onClose={busy ? () => undefined : onClose}><div className="confirm-dialog"><AlertTriangle size={24} /><p>{description}</p><div className="dialog-actions"><button type="button" data-initial-focus className="secondary-button" disabled={busy} onClick={onClose}>取消</button><button type="button" className={danger ? 'danger-button' : 'primary-button'} disabled={busy} onClick={() => void onConfirm()}>{busy ? '正在处理...' : confirmLabel}</button></div></div></Modal>
 }
 
 function Metric({ icon, title, value, detail, tone }: { icon: ReactNode; title: string; value: string; detail: string; tone: string }) { return <article className={`metric ${tone}`}><div className="metric-head"><h2>{title}</h2><span>{icon}</span></div><p>{detail}</p><strong>{value}</strong></article> }
@@ -825,6 +1011,7 @@ function Status({ status, protected: active }: { status: string; protected?: boo
 function AgentStatus({ agent }: { agent: Agent }) {
 	if (agent.credential_state === 'revoked') return <span className="status revoked"><i />已撤销</span>
 	if (agent.credential_state === 'rotation_pending') return <span className="status pending"><i />换钥中</span>
+	if (agent.telemetry?.adaptive?.emergency) return <span className="status emergency" title={agent.telemetry.adaptive.reason}><i />应急中</span>
 	return <Status status={agent.status} protected={agent.telemetry?.protected} />
 }
 function PublicAddresses({ agent }: { agent: Agent }) {
@@ -865,6 +1052,7 @@ function formatNetworkRate(bytesPerSecond: number) {
 	return `${Math.round(bitsPerSecond)} bps`
 }
 function formatTime(value: string) { if (!value) return '-'; return new Date(value).toLocaleString('zh-CN', { hour12: false }) }
+function formatMetricTime(value: string) { if (!value) return '-'; return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) }
 function relativeTime(value: string) { const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return `${seconds}秒前`; if (seconds < 3600) return `${Math.floor(seconds / 60)}分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)}小时前`; return `${Math.floor(seconds / 86400)}天前` }
 function primaryAddress(agent: Agent) { return agent.ipv4_address || agent.ipv6_address || agent.ip_address }
 function supportsTCP(protocol: string) { return protocol.toLowerCase() === 'tcp' || protocol.toLowerCase() === 'tcp+udp' }
@@ -884,7 +1072,7 @@ function discoveredPorts(agent: Agent): DiscoveredPort[] {
 function nodeNetworkUsesTCP(network: string) { return !['kcp', 'mkcp', 'quic'].includes(network.toLowerCase()) }
 function defaultAgentPolicy(name: string, sources: DiscoveredPort[]): Policy {
   const ports = [...new Set(sources.filter(source => source.tcp).map(source => source.port))].map(plainPortRule)
-  return { id: 0, revision: 1, name: `${name} 防护`, enabled: true, ports, global: { rate: 800, burst: 4000, exempt_ports: [22, 48357], enabled: true }, trusted_cidrs: [] }
+	return { id: 0, revision: 1, name: `${name} 防护`, enabled: true, ports, global: { rate: 800, burst: 4000, exempt_ports: [22, 48357], enabled: true }, adaptive: { enabled: false, trigger_conntrack_percent: 70, recover_conntrack_percent: 45, trigger_connections: 8000, recover_connections: 5000, trigger_syn: 400, recover_syn: 100, emergency_rate: 200, emergency_burst: 600 }, trusted_cidrs: [] }
 }
 function formatListen(listen: string | undefined, port: number) { return `${listen || '0.0.0.0'}:${port}` }
 
@@ -893,7 +1081,7 @@ function agentNeedsAttention(agent: Agent) {
 	const telemetry = agent.telemetry
 	if (agent.status !== 'online' || agent.credential_state !== 'active' || !agent.secure_channel || !agent.controller_verified_at) return true
 	if (!telemetry) return true
-	return (telemetry.cpu_usage || 0) >= 90 || (telemetry.memory_total > 0 && telemetry.memory_used / telemetry.memory_total >= .9) || (telemetry.conntrack_max > 0 && telemetry.conntrack / telemetry.conntrack_max >= .8) || telemetry.sockets.syn_recv >= 1000
+	return Boolean(telemetry.adaptive?.emergency) || (telemetry.cpu_usage || 0) >= 90 || (telemetry.memory_total > 0 && telemetry.memory_used / telemetry.memory_total >= .9) || (telemetry.conntrack_max > 0 && telemetry.conntrack / telemetry.conntrack_max >= .8) || telemetry.sockets.syn_recv >= 1000
 }
 
 function readAgentSort(): { key: AgentSortKey; direction: SortDirection } {
@@ -935,6 +1123,12 @@ function validatePolicy(policy: Policy) {
     if (rule.aggregate_burst < rule.aggregate_rate) return `端口 ${rule.port} 的总突发额度不能低于总速率`
   }
   if (policy.global.enabled && (policy.global.rate < 1 || policy.global.burst < policy.global.rate)) return '整机突发额度不能低于整机 SYN 速率'
+	if (policy.adaptive.enabled) {
+		if (policy.adaptive.recover_conntrack_percent >= policy.adaptive.trigger_conntrack_percent) return 'Conntrack 恢复阈值必须低于触发阈值'
+		if (policy.adaptive.recover_connections >= policy.adaptive.trigger_connections) return '连接数恢复阈值必须低于触发阈值'
+		if (policy.adaptive.recover_syn >= policy.adaptive.trigger_syn) return 'SYN 恢复阈值必须低于触发阈值'
+		if (policy.adaptive.emergency_rate < 1 || policy.adaptive.emergency_burst < policy.adaptive.emergency_rate) return '应急突发额度不能低于应急新建速率'
+	}
   if (policy.global.exempt_ports.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) return '永久排除端口必须是 1 到 65535 的整数'
   return ''
 }
@@ -943,6 +1137,10 @@ function eventKindLabel(kind: string) {
 	  const labels: Record<string, string> = {
 	    system_setup: '系统初始化', login_succeeded: '登录成功', login_failed: '登录失败', login_limited: '登录限速',
 	    enrollment_created: '注册令牌', agent_enrolled: 'Agent 注册', agent_online: 'Agent 上线', agent_deleted: 'Agent 删除', agent_renamed: '名称修改',
+		adaptive_emergency_activated: '应急保护启动', adaptive_emergency_recovered: '应急保护恢复',
+		ip_ban_created: 'IP 封禁', ip_ban_deleted: 'IP 解封',
+		policy_restored: '策略恢复', policy_restore_failed: '策略恢复失败', policy_history_failed: '策略历史失败',
+		policy_deploy_queued: '策略排队', policy_deploy_completed: '策略任务完成',
 	    agent_identity_mismatch: 'Agent 身份异常', controller_identity_mismatch: '主控身份异常', agent_credential_rotation_pending: '轮换待确认', agent_credential_rotation_failed: '轮换失败',
 	    agent_credential_rotation_started: '轮换已下发', agent_credential_rotated: '凭据已轮换', agent_credential_revoked: '凭据已撤销',
 	    agent_pairing_created: '重新配对令牌', agent_repaired: '重新配对完成', password_change_failed: '改密失败', password_changed: '密码已修改',
@@ -955,8 +1153,8 @@ function readRoute(): RouteState {
   const params = new URLSearchParams(window.location.search)
   const rawTab = params.get('view')
   const rawDetail = params.get('section')
-  const tabs: Tab[] = ['overview', 'agents', 'events', 'updates']
-	const detailTabs: DetailTab[] = ['overview', 'protection', 'services', 'security', 'events']
+	const tabs: Tab[] = ['overview', 'agents', 'tasks', 'events', 'updates']
+	const detailTabs: DetailTab[] = ['overview', 'metrics', 'protection', 'bans', 'services', 'security', 'events']
   const agentID = params.get('server') || ''
   return {
     tab: tabs.includes(rawTab as Tab) ? rawTab as Tab : agentID ? 'agents' : 'overview',

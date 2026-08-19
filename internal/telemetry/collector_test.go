@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/T-Matrix/mmwx-guard/internal/model"
 )
 
 func TestParseCPUSample(t *testing.T) {
@@ -97,5 +99,14 @@ SYN-SENT 0 1 10.0.0.2:51001 45.59.186.47:443`
 	}
 	if len(sources) != 2 || sources[0].IP == "156.229.164.222" || sources[1].IP == "156.229.164.222" {
 		t.Fatalf("parseSocketStats() sources = %#v", sources)
+	}
+}
+
+func TestSourceWeightSaturatesWithoutWrapping(t *testing.T) {
+	if got := sourceWeight(model.SourceCount{Connections: 10, Dropped: ^uint64(0) - 5}); got != ^uint64(0) {
+		t.Fatalf("sourceWeight() = %d, want saturation", got)
+	}
+	if got := sourceWeight(model.SourceCount{Connections: -1, Dropped: 9}); got != 9 {
+		t.Fatalf("sourceWeight() accepted a negative connection count: %d", got)
 	}
 }

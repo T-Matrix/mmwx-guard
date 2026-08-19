@@ -50,7 +50,7 @@ func ApplyControllerUpdate(ctx context.Context, options ApplyOptions) (returnErr
 		_ = writeJSONAtomic(statusPath, Status{
 			State: state, Version: request.Version, Message: message,
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		}, 0644)
+		}, 0600)
 	}
 	defer func() {
 		if returnErr != nil {

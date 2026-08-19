@@ -10,8 +10,18 @@ export type Status = {
 }
 
 export type SourceCount = { ip: string; connections: number; dropped?: number }
+export type IPBan = { id: number; agent_id: string; address: string; reason?: string; expires_at?: string; created_at: string; applied: boolean; last_error?: string }
 export type ForwardRule = { id: string; protocol: string; listen: string; listen_port: number; remote: string; active: boolean }
 export type MMWNode = { tag?: string; listen?: string; port: number; protocol: string; network?: string; security?: string; active: boolean }
+export type PortHealth = {
+	key: string
+	kind: 'mmw' | 'forwardx'
+	port: number
+	status: 'healthy' | 'unhealthy' | 'unsupported'
+	latency_ms?: number
+	error?: string
+	checked_at: string
+}
 export type Integrations = {
   mmw?: { active: boolean; master_url?: string; connection_mode?: string; xray_mode?: string; nodes: MMWNode[] }
   forwardx?: { active: boolean; panel_url?: string; rules: ForwardRule[] }
@@ -37,6 +47,8 @@ export type Telemetry = {
   policy_revision: number
   top_sources: SourceCount[]
   integrations?: Integrations
+	port_health?: PortHealth[]
+	adaptive?: { enabled: boolean; emergency: boolean; reason?: string; since?: string }
 }
 
 export type Agent = {
@@ -62,6 +74,7 @@ export type Agent = {
 	controller_key_fingerprint?: string
 	controller_verified_at?: string
 	secure_channel: boolean
+	connection_transport?: 'websocket' | 'https_pull'
 }
 
 export type PortRule = {
@@ -80,8 +93,59 @@ export type Policy = {
   enabled: boolean
   ports: PortRule[]
   global: { rate: number; burst: number; exempt_ports: number[]; enabled: boolean }
+	adaptive: {
+		enabled: boolean
+		trigger_conntrack_percent: number
+		recover_conntrack_percent: number
+		trigger_connections: number
+		recover_connections: number
+		trigger_syn: number
+		recover_syn: number
+		emergency_rate: number
+		emergency_burst: number
+	}
   trusted_cidrs: string[]
   updated_at?: string
+}
+
+export type PolicyHistory = {
+	id: number
+	agent_id: string
+	revision: number
+	source: 'saved' | 'restored'
+	author: string
+	message?: string
+	policy: Policy
+	created_at: string
+}
+
+export type AgentTask = {
+	id: number
+	agent_id: string
+	kind: 'policy_deploy' | 'ban_sync'
+	state: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+	message?: string
+	attempts: number
+	created_at: string
+	started_at?: string
+	finished_at?: string
+	updated_at: string
+}
+
+export type MetricPoint = {
+	timestamp: string
+	cpu_usage: number
+	memory_percent: number
+	receive_rate: number
+	transmit_rate: number
+	established: number
+	time_wait: number
+	syn_recv: number
+	conntrack: number
+	conntrack_percent: number
+	dropped_total: number
+	dropped_delta: number
+	emergency: boolean
 }
 
 export type EventItem = {

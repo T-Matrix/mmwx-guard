@@ -25,15 +25,28 @@ type GlobalRule struct {
 	Enabled     bool     `json:"enabled"`
 }
 
+type AdaptiveRule struct {
+	Enabled                 bool `json:"enabled"`
+	TriggerConntrackPercent int  `json:"trigger_conntrack_percent"`
+	RecoverConntrackPercent int  `json:"recover_conntrack_percent"`
+	TriggerConnections      int  `json:"trigger_connections"`
+	RecoverConnections      int  `json:"recover_connections"`
+	TriggerSYN              int  `json:"trigger_syn"`
+	RecoverSYN              int  `json:"recover_syn"`
+	EmergencyRate           int  `json:"emergency_rate"`
+	EmergencyBurst          int  `json:"emergency_burst"`
+}
+
 type Policy struct {
-	ID             int64      `json:"id"`
-	Revision       int64      `json:"revision"`
-	Name           string     `json:"name"`
-	Enabled        bool       `json:"enabled"`
-	Ports          []PortRule `json:"ports"`
-	Global         GlobalRule `json:"global"`
-	TrustedCIDRs   []string   `json:"trusted_cidrs"`
-	UpdatedAt      string     `json:"updated_at,omitempty"`
+	ID           int64        `json:"id"`
+	Revision     int64        `json:"revision"`
+	Name         string       `json:"name"`
+	Enabled      bool         `json:"enabled"`
+	Ports        []PortRule   `json:"ports"`
+	Global       GlobalRule   `json:"global"`
+	Adaptive     AdaptiveRule `json:"adaptive"`
+	TrustedCIDRs []string     `json:"trusted_cidrs"`
+	UpdatedAt    string       `json:"updated_at,omitempty"`
 }
 
 func DefaultPolicy() Policy {
@@ -48,6 +61,20 @@ func DefaultPolicy() Policy {
 		Global: GlobalRule{
 			Rate: 800, Burst: 4000, ExemptPorts: []uint16{22, 48357}, Enabled: true,
 		},
+		Adaptive: defaultAdaptiveRule(),
+	}
+}
+
+func defaultAdaptiveRule() AdaptiveRule {
+	return AdaptiveRule{
+		TriggerConntrackPercent: 70,
+		RecoverConntrackPercent: 45,
+		TriggerConnections:      8000,
+		RecoverConnections:      5000,
+		TriggerSYN:              400,
+		RecoverSYN:              100,
+		EmergencyRate:           200,
+		EmergencyBurst:          600,
 	}
 }
 
@@ -64,6 +91,31 @@ func (p *Policy) Normalize() {
 	}
 	if p.Global.ExemptPorts == nil {
 		p.Global.ExemptPorts = []uint16{}
+	}
+	defaults := defaultAdaptiveRule()
+	if p.Adaptive.TriggerConntrackPercent == 0 {
+		p.Adaptive.TriggerConntrackPercent = defaults.TriggerConntrackPercent
+	}
+	if p.Adaptive.RecoverConntrackPercent == 0 {
+		p.Adaptive.RecoverConntrackPercent = defaults.RecoverConntrackPercent
+	}
+	if p.Adaptive.TriggerConnections == 0 {
+		p.Adaptive.TriggerConnections = defaults.TriggerConnections
+	}
+	if p.Adaptive.RecoverConnections == 0 {
+		p.Adaptive.RecoverConnections = defaults.RecoverConnections
+	}
+	if p.Adaptive.TriggerSYN == 0 {
+		p.Adaptive.TriggerSYN = defaults.TriggerSYN
+	}
+	if p.Adaptive.RecoverSYN == 0 {
+		p.Adaptive.RecoverSYN = defaults.RecoverSYN
+	}
+	if p.Adaptive.EmergencyRate == 0 {
+		p.Adaptive.EmergencyRate = defaults.EmergencyRate
+	}
+	if p.Adaptive.EmergencyBurst == 0 {
+		p.Adaptive.EmergencyBurst = defaults.EmergencyBurst
 	}
 	sort.Slice(p.Ports, func(i, j int) bool { return p.Ports[i].Port < p.Ports[j].Port })
 	sort.Slice(p.Global.ExemptPorts, func(i, j int) bool { return p.Global.ExemptPorts[i] < p.Global.ExemptPorts[j] })
@@ -103,6 +155,23 @@ func (p Policy) Validate() error {
 	}
 	if p.Global.Enabled {
 		if err := validateRate("global", p.Global.Rate, p.Global.Burst); err != nil {
+			return err
+		}
+	}
+	if p.Adaptive.Enabled {
+		if p.Adaptive.TriggerConntrackPercent < 20 || p.Adaptive.TriggerConntrackPercent > 99 {
+			return errors.New("adaptive conntrack trigger must be between 20 and 99 percent")
+		}
+		if p.Adaptive.RecoverConntrackPercent < 5 || p.Adaptive.RecoverConntrackPercent >= p.Adaptive.TriggerConntrackPercent {
+			return errors.New("adaptive conntrack recovery must be lower than the trigger")
+		}
+		if p.Adaptive.TriggerConnections < 100 || p.Adaptive.TriggerConnections > 100_000_000 || p.Adaptive.RecoverConnections < 1 || p.Adaptive.RecoverConnections >= p.Adaptive.TriggerConnections {
+			return errors.New("adaptive connection recovery must be lower than the trigger")
+		}
+		if p.Adaptive.TriggerSYN < 10 || p.Adaptive.TriggerSYN > 10_000_000 || p.Adaptive.RecoverSYN < 1 || p.Adaptive.RecoverSYN >= p.Adaptive.TriggerSYN {
+			return errors.New("adaptive SYN recovery must be lower than the trigger")
+		}
+		if err := validateRate("adaptive emergency", p.Adaptive.EmergencyRate, p.Adaptive.EmergencyBurst); err != nil {
 			return err
 		}
 	}

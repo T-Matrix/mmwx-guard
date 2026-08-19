@@ -14,7 +14,10 @@ import (
 	"github.com/T-Matrix/mmwx-guard/internal/model"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound              = errors.New("not found")
+	ErrTaskAttemptsExhausted = errors.New("task attempts exhausted")
+)
 
 type Store struct {
 	db *sql.DB
@@ -89,6 +92,7 @@ CREATE TABLE IF NOT EXISTS agents (
 	controller_key_fingerprint TEXT NOT NULL DEFAULT '',
 	controller_verified_at TEXT NOT NULL DEFAULT '',
 	secure_channel INTEGER NOT NULL DEFAULT 0,
+	connection_transport TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'offline',
     ip_address TEXT NOT NULL DEFAULT '',
 	ipv4_address TEXT NOT NULL DEFAULT '',
@@ -112,12 +116,73 @@ CREATE TABLE IF NOT EXISTS events (
     data_json TEXT,
     created_at TEXT NOT NULL
 );
+	CREATE TABLE IF NOT EXISTS ip_bans (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	    address TEXT NOT NULL,
+	    reason TEXT NOT NULL DEFAULT '',
+	    expires_at TEXT NOT NULL DEFAULT '',
+	    created_at TEXT NOT NULL,
+	    applied INTEGER NOT NULL DEFAULT 0,
+	    last_error TEXT NOT NULL DEFAULT '',
+	    UNIQUE(agent_id, address)
+	);
+	CREATE TABLE IF NOT EXISTS policy_history (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	    revision INTEGER NOT NULL,
+	    source TEXT NOT NULL,
+	    author TEXT NOT NULL,
+	    message TEXT NOT NULL DEFAULT '',
+	    policy_json TEXT NOT NULL,
+	    created_at TEXT NOT NULL,
+	    UNIQUE(agent_id, revision)
+	);
+	CREATE TABLE IF NOT EXISTS agent_tasks (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	    kind TEXT NOT NULL,
+	    state TEXT NOT NULL,
+	    payload_json TEXT NOT NULL,
+	    message TEXT NOT NULL DEFAULT '',
+	    attempts INTEGER NOT NULL DEFAULT 0,
+	    created_at TEXT NOT NULL,
+	    started_at TEXT NOT NULL DEFAULT '',
+	    finished_at TEXT NOT NULL DEFAULT '',
+	    updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS metric_samples (
+		agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+		bucket INTEGER NOT NULL,
+		cpu_usage REAL NOT NULL,
+		memory_used REAL NOT NULL,
+		memory_total REAL NOT NULL,
+		receive_rate REAL NOT NULL,
+		transmit_rate REAL NOT NULL,
+		established REAL NOT NULL,
+		time_wait REAL NOT NULL,
+		syn_recv REAL NOT NULL,
+		conntrack REAL NOT NULL,
+		conntrack_max REAL NOT NULL,
+		dropped_total REAL NOT NULL,
+		emergency INTEGER NOT NULL,
+		PRIMARY KEY(agent_id, bucket)
+	);
 	CREATE INDEX IF NOT EXISTS idx_events_created ON events(id DESC);
 	CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+	CREATE INDEX IF NOT EXISTS idx_ip_bans_agent ON ip_bans(agent_id, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_policy_history_agent ON policy_history(agent_id, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_agent_tasks_agent_state ON agent_tasks(agent_id, state, id);
+	CREATE INDEX IF NOT EXISTS idx_metric_samples_bucket ON metric_samples(bucket);
 	CREATE TRIGGER IF NOT EXISTS trim_events AFTER INSERT ON events
 	WHEN NEW.id % 100 = 0
 	BEGIN
 	    DELETE FROM events WHERE id < NEW.id - 10000;
+	END;
+	CREATE TRIGGER IF NOT EXISTS trim_metric_samples AFTER INSERT ON metric_samples
+	WHEN NEW.bucket % 3600 = 0
+	BEGIN
+		DELETE FROM metric_samples WHERE bucket < NEW.bucket - 2592000;
 	END;
 	`
 	if _, err := s.db.Exec(schema); err != nil {
@@ -135,6 +200,7 @@ CREATE TABLE IF NOT EXISTS events (
 		{"agents", "controller_key_fingerprint", "TEXT NOT NULL DEFAULT ''"},
 		{"agents", "controller_verified_at", "TEXT NOT NULL DEFAULT ''"},
 		{"agents", "secure_channel", "INTEGER NOT NULL DEFAULT 0"},
+		{"agents", "connection_transport", "TEXT NOT NULL DEFAULT ''"},
 		{"agents", "ipv4_address", "TEXT NOT NULL DEFAULT ''"},
 		{"agents", "ipv6_address", "TEXT NOT NULL DEFAULT ''"},
 		{"agents", "address_updated_at", "TEXT NOT NULL DEFAULT ''"},
@@ -143,6 +209,16 @@ CREATE TABLE IF NOT EXISTS events (
 		if err := s.ensureColumn(column.table, column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	stamp := now()
+	if _, err := s.db.Exec(`UPDATE agent_tasks
+		SET state=CASE WHEN attempts>=? THEN 'failed' ELSE 'queued' END,
+			message=CASE WHEN attempts>=? THEN '任务已达到最大尝试次数' ELSE '主控重启后自动恢复排队' END,
+			started_at=CASE WHEN attempts>=? THEN started_at ELSE '' END,
+			finished_at=CASE WHEN attempts>=? THEN ? ELSE '' END,
+			updated_at=?
+		WHERE state='running'`, model.AgentTaskMaxAttempts, model.AgentTaskMaxAttempts, model.AgentTaskMaxAttempts, model.AgentTaskMaxAttempts, stamp, stamp); err != nil {
+		return err
 	}
 	return nil
 }
@@ -337,8 +413,8 @@ func (s *Store) AgentCredentials(ctx context.Context, id string) (credentials Ag
 	return
 }
 
-func (s *Store) SetAgentConnected(ctx context.Context, id, ip, osName, arch, version string, secure bool) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET status='online',ip_address=?,os=?,arch=?,version=?,last_seen=?,last_authenticated_at=?,secure_channel=?,controller_key_fingerprint='',controller_verified_at='' WHERE id=?`, ip, osName, arch, version, now(), now(), secure, id)
+func (s *Store) SetAgentConnected(ctx context.Context, id, ip, osName, arch, version, transport string, secure bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET status='online',ip_address=?,os=?,arch=?,version=?,last_seen=?,last_authenticated_at=?,secure_channel=?,connection_transport=?,controller_key_fingerprint='',controller_verified_at='' WHERE id=?`, ip, osName, arch, version, now(), now(), secure, transport, id)
 	return err
 }
 
@@ -426,12 +502,101 @@ func (s *Store) UpdateTelemetry(ctx context.Context, id string, telemetry model.
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE agents SET telemetry_json=?,last_seen=?,status='online',policy_revision=? WHERE id=?`, string(raw), now(), telemetry.PolicyRevision, id)
-	return err
+	collectedAt, err := time.Parse(time.RFC3339Nano, telemetry.CollectedAt)
+	if err != nil {
+		collectedAt = time.Now()
+	}
+	bucket := collectedAt.UTC().Truncate(time.Minute).Unix()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE agents SET telemetry_json=?,last_seen=?,status='online',policy_revision=? WHERE id=?`, string(raw), now(), telemetry.PolicyRevision, id)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	emergency := 0
+	if telemetry.Adaptive.Emergency {
+		emergency = 1
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO metric_samples(
+		agent_id,bucket,cpu_usage,memory_used,memory_total,receive_rate,transmit_rate,established,time_wait,syn_recv,conntrack,conntrack_max,dropped_total,emergency
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(agent_id,bucket) DO UPDATE SET
+		cpu_usage=excluded.cpu_usage,memory_used=excluded.memory_used,memory_total=excluded.memory_total,
+		receive_rate=excluded.receive_rate,transmit_rate=excluded.transmit_rate,established=excluded.established,
+		time_wait=excluded.time_wait,syn_recv=excluded.syn_recv,conntrack=excluded.conntrack,
+		conntrack_max=excluded.conntrack_max,dropped_total=excluded.dropped_total,emergency=excluded.emergency`,
+		id, bucket, telemetry.CPUUsage, float64(telemetry.MemoryUsed), float64(telemetry.MemoryTotal),
+		float64(telemetry.Network.ReceiveBytesPerSecond), float64(telemetry.Network.TransmitBytesPerSecond),
+		telemetry.Sockets.Established, telemetry.Sockets.TimeWait, telemetry.Sockets.SynRecv,
+		float64(telemetry.Conntrack), float64(telemetry.ConntrackMax), float64(telemetry.DroppedTotal), emergency)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListMetricSamples(ctx context.Context, agentID string, since time.Time, step time.Duration) ([]model.MetricPoint, error) {
+	stepSeconds := int64(step / time.Second)
+	if stepSeconds < 60 || stepSeconds > int64(24*time.Hour/time.Second) {
+		return nil, errors.New("invalid metric aggregation step")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		(bucket / ?) * ?,
+		AVG(cpu_usage),
+		AVG(CASE WHEN memory_total>0 THEN memory_used*100.0/memory_total ELSE 0 END),
+		AVG(receive_rate),AVG(transmit_rate),AVG(established),AVG(time_wait),AVG(syn_recv),AVG(conntrack),
+		AVG(CASE WHEN conntrack_max>0 THEN conntrack*100.0/conntrack_max ELSE 0 END),
+		MAX(dropped_total),MAX(emergency)
+		FROM metric_samples WHERE agent_id=? AND bucket>=?
+		GROUP BY (bucket / ?) ORDER BY (bucket / ?) LIMIT 1000`,
+		stepSeconds, stepSeconds, agentID, since.UTC().Unix(), stepSeconds, stepSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	points := make([]model.MetricPoint, 0)
+	var previousDropped uint64
+	for rows.Next() {
+		var timestamp int64
+		var cpu, memory, receive, transmit, established, timeWait, synRecv, conntrack, conntrackPercent, dropped float64
+		var emergency int
+		if err := rows.Scan(&timestamp, &cpu, &memory, &receive, &transmit, &established, &timeWait, &synRecv, &conntrack, &conntrackPercent, &dropped, &emergency); err != nil {
+			return nil, err
+		}
+		point := model.MetricPoint{
+			Timestamp: time.Unix(timestamp, 0).UTC().Format(time.RFC3339), CPUUsage: cpu, MemoryPercent: memory,
+			ReceiveRate: roundedUint64(receive), TransmitRate: roundedUint64(transmit),
+			Established: int(established + 0.5), TimeWait: int(timeWait + 0.5), SynRecv: int(synRecv + 0.5),
+			Conntrack: roundedUint64(conntrack), ConntrackPercent: conntrackPercent,
+			DroppedTotal: roundedUint64(dropped), Emergency: emergency != 0,
+		}
+		if len(points) > 0 {
+			if point.DroppedTotal >= previousDropped {
+				point.DroppedDelta = point.DroppedTotal - previousDropped
+			} else {
+				point.DroppedDelta = point.DroppedTotal
+			}
+		}
+		previousDropped = point.DroppedTotal
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
+func roundedUint64(value float64) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	return uint64(value + 0.5)
 }
 
 func (s *Store) ListAgents(ctx context.Context) ([]model.AgentSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.name,a.status,a.ip_address,a.ipv4_address,a.ipv6_address,a.address_updated_at,a.os,a.arch,a.version,a.last_seen,COALESCE(a.policy_id,0),COALESCE(p.name,''),a.policy_revision,a.telemetry_json,a.pending_secret_hash,a.pending_secret_expires_at,a.credential_rotated_at,a.credential_revoked_at,a.last_authenticated_at,a.controller_key_fingerprint,a.controller_verified_at,a.secure_channel FROM agents a LEFT JOIN policies p ON p.id=a.policy_id ORDER BY a.name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.name,a.status,a.ip_address,a.ipv4_address,a.ipv6_address,a.address_updated_at,a.os,a.arch,a.version,a.last_seen,COALESCE(a.policy_id,0),COALESCE(p.name,''),a.policy_revision,a.telemetry_json,a.pending_secret_hash,a.pending_secret_expires_at,a.credential_rotated_at,a.credential_revoked_at,a.last_authenticated_at,a.controller_key_fingerprint,a.controller_verified_at,a.secure_channel,a.connection_transport FROM agents a LEFT JOIN policies p ON p.id=a.policy_id ORDER BY a.name`)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +606,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]model.AgentSummary, error) {
 		var a model.AgentSummary
 		var telemetry sql.NullString
 		var pendingHash, pendingExpires string
-		if err := rows.Scan(&a.ID, &a.Name, &a.Status, &a.IPAddress, &a.IPv4Address, &a.IPv6Address, &a.AddressUpdatedAt, &a.OS, &a.Arch, &a.Version, &a.LastSeen, &a.PolicyID, &a.PolicyName, &a.PolicyRevision, &telemetry, &pendingHash, &pendingExpires, &a.CredentialRotatedAt, &a.CredentialRevokedAt, &a.LastAuthenticatedAt, &a.ControllerKeyFingerprint, &a.ControllerVerifiedAt, &a.SecureChannel); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Status, &a.IPAddress, &a.IPv4Address, &a.IPv6Address, &a.AddressUpdatedAt, &a.OS, &a.Arch, &a.Version, &a.LastSeen, &a.PolicyID, &a.PolicyName, &a.PolicyRevision, &telemetry, &pendingHash, &pendingExpires, &a.CredentialRotatedAt, &a.CredentialRevokedAt, &a.LastAuthenticatedAt, &a.ControllerKeyFingerprint, &a.ControllerVerifiedAt, &a.SecureChannel, &a.ConnectionTransport); err != nil {
 			return nil, err
 		}
 		a.CredentialState = "active"
@@ -595,6 +760,328 @@ func (s *Store) RenameAgent(ctx context.Context, agentID, name string) error {
 	return nil
 }
 
+func (s *Store) SaveIPBan(ctx context.Context, agentID, address, reason string, expiresAt time.Time) (model.IPBan, error) {
+	expires := ""
+	if !expiresAt.IsZero() {
+		expires = expiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	stamp := now()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO ip_bans(agent_id,address,reason,expires_at,created_at,applied,last_error)
+		VALUES(?,?,?,?,?,0,'') ON CONFLICT(agent_id,address) DO UPDATE SET reason=excluded.reason,expires_at=excluded.expires_at,created_at=excluded.created_at,applied=0,last_error=''`, agentID, address, reason, expires, stamp)
+	if err != nil {
+		return model.IPBan{}, err
+	}
+	return s.GetIPBan(ctx, agentID, address)
+}
+
+func (s *Store) GetIPBan(ctx context.Context, agentID, address string) (model.IPBan, error) {
+	var ban model.IPBan
+	var applied int
+	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,address,reason,expires_at,created_at,applied,last_error FROM ip_bans WHERE agent_id=? AND address=?`, agentID, address).Scan(&ban.ID, &ban.AgentID, &ban.Address, &ban.Reason, &ban.ExpiresAt, &ban.CreatedAt, &applied, &ban.LastError)
+	ban.Applied = applied != 0
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrNotFound
+	}
+	return ban, err
+}
+
+func (s *Store) ListIPBans(ctx context.Context, agentID string) ([]model.IPBan, error) {
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM ip_bans WHERE agent_id=? AND expires_at<>'' AND expires_at<=?`, agentID, now())
+	rows, err := s.db.QueryContext(ctx, `SELECT id,agent_id,address,reason,expires_at,created_at,applied,last_error FROM ip_bans WHERE agent_id=? ORDER BY CASE WHEN expires_at='' THEN 0 ELSE 1 END,id DESC`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bans := make([]model.IPBan, 0)
+	for rows.Next() {
+		var ban model.IPBan
+		var applied int
+		if err := rows.Scan(&ban.ID, &ban.AgentID, &ban.Address, &ban.Reason, &ban.ExpiresAt, &ban.CreatedAt, &applied, &ban.LastError); err != nil {
+			return nil, err
+		}
+		ban.Applied = applied != 0
+		bans = append(bans, ban)
+	}
+	return bans, rows.Err()
+}
+
+func (s *Store) DeleteIPBan(ctx context.Context, agentID string, banID int64) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM ip_bans WHERE id=? AND agent_id=?`, banID, agentID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetIPBansApplyState(ctx context.Context, agentID string, applied bool, lastError string) error {
+	if len(lastError) > 2048 {
+		lastError = lastError[:2048]
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE ip_bans SET applied=?,last_error=? WHERE agent_id=?`, applied, lastError, agentID)
+	return err
+}
+
+func (s *Store) RecordPolicyHistory(ctx context.Context, agentID, source, author, message string, policy model.Policy) (model.PolicyHistory, error) {
+	policy.Normalize()
+	if err := policy.Validate(); err != nil {
+		return model.PolicyHistory{}, err
+	}
+	if source != "saved" && source != "restored" {
+		return model.PolicyHistory{}, errors.New("invalid policy history source")
+	}
+	if len(author) > 80 || len(message) > 2048 {
+		return model.PolicyHistory{}, errors.New("policy history metadata is too long")
+	}
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		return model.PolicyHistory{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.PolicyHistory{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO policy_history(agent_id,revision,source,author,message,policy_json,created_at) VALUES(?,?,?,?,?,?,?)`, agentID, policy.Revision, source, author, message, string(raw), now())
+	if err != nil {
+		return model.PolicyHistory{}, err
+	}
+	id, _ := result.LastInsertId()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM policy_history WHERE agent_id=? AND id NOT IN (SELECT id FROM policy_history WHERE agent_id=? ORDER BY id DESC LIMIT 100)`, agentID, agentID); err != nil {
+		return model.PolicyHistory{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.PolicyHistory{}, err
+	}
+	return s.GetPolicyHistory(ctx, agentID, id)
+}
+
+func (s *Store) GetPolicyHistory(ctx context.Context, agentID string, historyID int64) (model.PolicyHistory, error) {
+	var history model.PolicyHistory
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,revision,source,author,message,policy_json,created_at FROM policy_history WHERE id=? AND agent_id=?`, historyID, agentID).Scan(&history.ID, &history.AgentID, &history.Revision, &history.Source, &history.Author, &history.Message, &raw, &history.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.PolicyHistory{}, ErrNotFound
+	}
+	if err != nil {
+		return model.PolicyHistory{}, err
+	}
+	if err := json.Unmarshal([]byte(raw), &history.Policy); err != nil {
+		return model.PolicyHistory{}, err
+	}
+	history.Policy.Normalize()
+	return history, nil
+}
+
+func (s *Store) ListPolicyHistory(ctx context.Context, agentID string, limit int) ([]model.PolicyHistory, error) {
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,agent_id,revision,source,author,message,policy_json,created_at FROM policy_history WHERE agent_id=? ORDER BY id DESC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	history := make([]model.PolicyHistory, 0)
+	for rows.Next() {
+		var item model.PolicyHistory
+		var raw string
+		if err := rows.Scan(&item.ID, &item.AgentID, &item.Revision, &item.Source, &item.Author, &item.Message, &raw, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &item.Policy); err != nil {
+			return nil, err
+		}
+		item.Policy.Normalize()
+		history = append(history, item)
+	}
+	return history, rows.Err()
+}
+
+func (s *Store) CreateAgentTask(ctx context.Context, agentID, kind string, payload any) (model.AgentTask, error) {
+	if kind != "policy_deploy" && kind != "ban_sync" {
+		return model.AgentTask{}, errors.New("invalid Agent task kind")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil || len(raw) > 64<<10 {
+		return model.AgentTask{}, errors.New("Agent task payload is invalid")
+	}
+	stamp := now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.AgentTask{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_tasks SET state='canceled',message='已由较新的同类任务取代',finished_at=?,updated_at=? WHERE agent_id=? AND kind=? AND state='queued'`, stamp, stamp, agentID, kind); err != nil {
+		return model.AgentTask{}, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO agent_tasks(agent_id,kind,state,payload_json,created_at,updated_at) VALUES(?,?,'queued',?,?,?)`, agentID, kind, string(raw), stamp, stamp)
+	if err != nil {
+		return model.AgentTask{}, err
+	}
+	id, _ := result.LastInsertId()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM agent_tasks WHERE id NOT IN (SELECT id FROM agent_tasks ORDER BY id DESC LIMIT 5000)`); err != nil {
+		return model.AgentTask{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.AgentTask{}, err
+	}
+	task, _, err := s.GetAgentTask(ctx, id)
+	return task, err
+}
+
+func (s *Store) GetAgentTask(ctx context.Context, taskID int64) (model.AgentTask, json.RawMessage, error) {
+	var task model.AgentTask
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT id,agent_id,kind,state,payload_json,message,attempts,created_at,started_at,finished_at,updated_at FROM agent_tasks WHERE id=?`, taskID).Scan(&task.ID, &task.AgentID, &task.Kind, &task.State, &raw, &task.Message, &task.Attempts, &task.CreatedAt, &task.StartedAt, &task.FinishedAt, &task.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = ErrNotFound
+	}
+	return task, json.RawMessage(raw), err
+}
+
+func (s *Store) ListAgentTasks(ctx context.Context, limit int) ([]model.AgentTask, error) {
+	if limit < 1 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,agent_id,kind,state,message,attempts,created_at,started_at,finished_at,updated_at FROM agent_tasks ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tasks := make([]model.AgentTask, 0)
+	for rows.Next() {
+		var task model.AgentTask
+		if err := rows.Scan(&task.ID, &task.AgentID, &task.Kind, &task.State, &task.Message, &task.Attempts, &task.CreatedAt, &task.StartedAt, &task.FinishedAt, &task.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func (s *Store) ListAgentTasksForAgent(ctx context.Context, agentID string, limit int) ([]model.AgentTask, error) {
+	if limit < 1 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,agent_id,kind,state,message,attempts,created_at,started_at,finished_at,updated_at FROM agent_tasks WHERE agent_id=? ORDER BY id DESC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tasks := make([]model.AgentTask, 0)
+	for rows.Next() {
+		var task model.AgentTask
+		if err := rows.Scan(&task.ID, &task.AgentID, &task.Kind, &task.State, &task.Message, &task.Attempts, &task.CreatedAt, &task.StartedAt, &task.FinishedAt, &task.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func (s *Store) QueuedAgentTasks(ctx context.Context, agentID string, limit int) ([]model.AgentTask, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,agent_id,kind,state,message,attempts,created_at,started_at,finished_at,updated_at FROM agent_tasks WHERE agent_id=? AND state='queued' ORDER BY id LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tasks := make([]model.AgentTask, 0)
+	for rows.Next() {
+		var task model.AgentTask
+		if err := rows.Scan(&task.ID, &task.AgentID, &task.Kind, &task.State, &task.Message, &task.Attempts, &task.CreatedAt, &task.StartedAt, &task.FinishedAt, &task.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
+
+func (s *Store) ClaimAgentTask(ctx context.Context, taskID int64) (model.AgentTask, json.RawMessage, error) {
+	stamp := now()
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET state='running',attempts=attempts+1,started_at=?,finished_at='',updated_at=? WHERE id=? AND state='queued' AND attempts<?`, stamp, stamp, taskID, model.AgentTaskMaxAttempts)
+	if err != nil {
+		return model.AgentTask{}, nil, err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return model.AgentTask{}, nil, ErrNotFound
+	}
+	return s.GetAgentTask(ctx, taskID)
+}
+
+func (s *Store) FinishAgentTask(ctx context.Context, taskID int64, success bool, message string) error {
+	state := "failed"
+	if success {
+		state = "succeeded"
+	}
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	stamp := now()
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET state=?,message=?,finished_at=?,updated_at=? WHERE id=? AND state='running'`, state, message, stamp, stamp, taskID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RequeueAgentTask(ctx context.Context, taskID int64, message string) error {
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state string
+	var attempts int
+	if err := tx.QueryRowContext(ctx, `SELECT state,attempts FROM agent_tasks WHERE id=?`, taskID).Scan(&state, &attempts); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if state != "running" && state != "failed" {
+		return ErrNotFound
+	}
+	stamp := now()
+	if attempts >= model.AgentTaskMaxAttempts {
+		if state == "running" {
+			if _, err := tx.ExecContext(ctx, `UPDATE agent_tasks SET state='failed',message='任务已达到最大尝试次数',finished_at=?,updated_at=? WHERE id=?`, stamp, stamp, taskID); err != nil {
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+		}
+		return ErrTaskAttemptsExhausted
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE agent_tasks SET state='queued',message=?,started_at='',finished_at='',updated_at=? WHERE id=?`, message, stamp, taskID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CancelAgentTask(ctx context.Context, taskID int64) error {
+	stamp := now()
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET state='canceled',message='管理员已取消',finished_at=?,updated_at=? WHERE id=? AND state IN ('queued','failed')`, stamp, stamp, taskID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 type Event struct {
 	ID        int64           `json:"id"`
 	Level     string          `json:"level"`
@@ -642,6 +1129,26 @@ func (s *Store) ListEvents(ctx context.Context, limit int) ([]Event, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) ListEventsForAgent(ctx context.Context, agentID string, limit int) ([]Event, error) {
+	if limit < 1 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,level,kind,COALESCE(agent_id,''),message,created_at FROM events WHERE agent_id=? ORDER BY id DESC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]Event, 0)
+	for rows.Next() {
+		var event Event
+		if err := rows.Scan(&event.ID, &event.Level, &event.Kind, &event.AgentID, &event.Message, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func (s *Store) Summary(ctx context.Context) (map[string]any, error) {

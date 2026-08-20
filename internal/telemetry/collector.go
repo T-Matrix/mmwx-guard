@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -23,23 +24,38 @@ import (
 )
 
 type Collector struct {
-	firewall     *firewall.Manager
-	cpuMu        sync.Mutex
-	lastCPU      cpuSample
-	hasCPU       bool
-	networkMu    sync.Mutex
-	lastNetwork  networkSample
-	hasNetwork   bool
-	discoveryMu  sync.Mutex
-	integrations model.Integrations
-	discoveredAt time.Time
-	healthMu     sync.Mutex
-	portHealth   []model.PortHealth
-	healthAt     time.Time
+	firewall      *firewall.Manager
+	cpuMu         sync.Mutex
+	lastCPU       cpuSample
+	hasCPU        bool
+	networkMu     sync.Mutex
+	lastNetwork   networkSample
+	hasNetwork    bool
+	discoveryMu   sync.Mutex
+	integrations  model.Integrations
+	discoveredAt  time.Time
+	healthMu      sync.Mutex
+	portHealth    []model.PortHealth
+	healthAt      time.Time
+	dropMu        sync.Mutex
+	dropState     dropCounterState
+	dropStatePath string
 }
 
-func NewCollector(manager *firewall.Manager) *Collector {
-	return &Collector{firewall: manager}
+const dropCounterStateFilename = "telemetry-drop-counter.json"
+
+type dropCounterState struct {
+	Total   uint64 `json:"total"`
+	LastRaw uint64 `json:"last_raw"`
+	Ready   bool   `json:"ready"`
+}
+
+func NewCollector(manager *firewall.Manager, stateDir string) *Collector {
+	collector := &Collector{firewall: manager, dropStatePath: filepath.Join(stateDir, dropCounterStateFilename)}
+	if raw, err := os.ReadFile(collector.dropStatePath); err == nil {
+		_ = json.Unmarshal(raw, &collector.dropState)
+	}
+	return collector
 }
 
 func (c *Collector) Collect(ctx context.Context) model.Telemetry {
@@ -52,7 +68,9 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 	t.Conntrack = readUint("/proc/sys/net/netfilter/nf_conntrack_count")
 	t.ConntrackMax = readUint("/proc/sys/net/netfilter/nf_conntrack_max")
 	t.Sockets, t.TopSources = socketStats(ctx)
-	t.Protected, t.DroppedTotal = nftStats(ctx)
+	protected, rawDrops := nftStats(ctx)
+	t.Protected = protected
+	t.DroppedTotal = c.cumulativeDrops(rawDrops, protected)
 	t.Integrations = c.integrationStats(ctx)
 	t.PortHealth = c.portHealthStats(ctx, t.Integrations)
 	if policy, err := c.firewall.CurrentPolicy(); err == nil {
@@ -63,6 +81,66 @@ func (c *Collector) Collect(ctx context.Context) model.Telemetry {
 		t.TopSources = t.TopSources[:model.MaxTopSources]
 	}
 	return t
+}
+
+func (c *Collector) cumulativeDrops(raw uint64, observed bool) uint64 {
+	c.dropMu.Lock()
+	defer c.dropMu.Unlock()
+	if !observed {
+		return c.dropState.Total
+	}
+	previous := c.dropState
+	if !c.dropState.Ready {
+		c.dropState.Total = raw
+		c.dropState.Ready = true
+	} else if raw >= c.dropState.LastRaw {
+		c.dropState.Total = saturatingAdd(c.dropState.Total, raw-c.dropState.LastRaw)
+	} else {
+		c.dropState.Total = saturatingAdd(c.dropState.Total, raw)
+	}
+	c.dropState.LastRaw = raw
+	if c.dropState != previous {
+		_ = writeDropCounterState(c.dropStatePath, c.dropState)
+	}
+	return c.dropState.Total
+}
+
+func saturatingAdd(left, right uint64) uint64 {
+	if ^uint64(0)-left < right {
+		return ^uint64(0)
+	}
+	return left + right
+}
+
+func writeDropCounterState(path string, state dropCounterState) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".telemetry-counter-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(raw); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 func (c *Collector) portHealthStats(ctx context.Context, integrations model.Integrations) []model.PortHealth {
@@ -367,23 +445,60 @@ func hostPart(value string) string {
 	return value
 }
 
-var counterPattern = regexp.MustCompile(`counter packets ([0-9]+) bytes`)
-
 func nftStats(ctx context.Context) (bool, uint64) {
 	if runtime.GOOS != "linux" {
 		return false, 0
 	}
-	out, err := exec.CommandContext(ctx, "nft", "list", "table", "inet", firewall.TableName).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", firewall.TableName).CombinedOutput()
 	if err != nil {
 		return false, 0
 	}
-	var total uint64
-	for _, match := range counterPattern.FindAllStringSubmatch(string(out), -1) {
-		value, _ := strconv.ParseUint(match[1], 10, 64)
-		total += value
+	total, err := parseNftDropRuleCounters(out)
+	if err != nil {
+		return false, 0
 	}
 	return true, total
 }
+
+func parseNftDropRuleCounters(raw []byte) (uint64, error) {
+	var document struct {
+		Nftables []struct {
+			Rule *struct {
+				Expressions []map[string]json.RawMessage `json:"expr"`
+			} `json:"rule"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, object := range document.Nftables {
+		if object.Rule == nil {
+			continue
+		}
+		var packets uint64
+		drops := false
+		for _, expression := range object.Rule.Expressions {
+			if _, ok := expression["drop"]; ok {
+				drops = true
+			}
+			if rawCounter, ok := expression["counter"]; ok {
+				var counter struct {
+					Packets uint64 `json:"packets"`
+				}
+				if json.Unmarshal(rawCounter, &counter) == nil {
+					packets = counter.Packets
+				}
+			}
+		}
+		if drops {
+			total = saturatingAdd(total, packets)
+		}
+	}
+	return total, nil
+}
+
+var nftSetCounterPattern = regexp.MustCompile(`([0-9A-Fa-f:.]+)\s+counter packets ([0-9]+)\s+bytes`)
 
 func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 	if runtime.GOOS != "linux" {
@@ -391,7 +506,7 @@ func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 	}
 	drops := map[string]uint64{}
 	for _, setName := range []string{"offenders_v4", "offenders_v6", "manual_bans_v4", "manual_bans_v6", "temporary_bans_v4", "temporary_bans_v6"} {
-		out, err := exec.CommandContext(ctx, "nft", "-j", "list", "set", "inet", firewall.TableName, setName).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "nft", "list", "set", "inet", firewall.TableName, setName).CombinedOutput()
 		if err != nil {
 			continue
 		}
@@ -416,32 +531,18 @@ func mergeOffenderDrops(ctx context.Context, top *[]model.SourceCount) {
 }
 
 func parseNftSetCounters(raw []byte) map[string]uint64 {
-	var document struct {
-		Nftables []struct {
-			Set struct {
-				Elements []struct {
-					Element struct {
-						Value   string `json:"val"`
-						Counter struct {
-							Packets uint64 `json:"packets"`
-						} `json:"counter"`
-					} `json:"elem"`
-				} `json:"elem"`
-			} `json:"set"`
-		} `json:"nftables"`
-	}
-	if json.Unmarshal(raw, &document) != nil {
-		return nil
-	}
 	counters := make(map[string]uint64)
-	for _, object := range document.Nftables {
-		for _, item := range object.Set.Elements {
-			address, err := netip.ParseAddr(item.Element.Value)
-			if err != nil {
-				continue
-			}
-			counters[address.Unmap().String()] += item.Element.Counter.Packets
+	for _, match := range nftSetCounterPattern.FindAllSubmatch(raw, -1) {
+		address, err := netip.ParseAddr(string(match[1]))
+		if err != nil {
+			continue
 		}
+		packets, err := strconv.ParseUint(string(match[2]), 10, 64)
+		if err != nil {
+			continue
+		}
+		key := address.Unmap().String()
+		counters[key] = saturatingAdd(counters[key], packets)
 	}
 	return counters
 }

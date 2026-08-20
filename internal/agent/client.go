@@ -104,7 +104,7 @@ func LoadOrEnroll(ctx context.Context, options Options, controllerURL, token, na
 	}
 	manager := firewall.NewManager(options.StateDir, options.DryRun)
 	return &Client{
-		config: cfg, options: options, firewall: manager, collector: telemetrypkg.NewCollector(manager),
+		config: cfg, options: options, firewall: manager, collector: telemetrypkg.NewCollector(manager, options.StateDir),
 		adaptive: newAdaptiveController(manager), seen: make(map[string]time.Time), results: make(map[string]cachedCommandResult),
 	}, nil
 }

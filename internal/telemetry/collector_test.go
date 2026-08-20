@@ -111,13 +111,57 @@ func TestSourceWeightSaturatesWithoutWrapping(t *testing.T) {
 	}
 }
 
-func TestParseNftSetCountersUsesStructuredElements(t *testing.T) {
-	raw := []byte(`{"nftables":[{"metainfo":{"json_schema_version":1}},{"set":{"family":"inet","name":"temporary_bans_v4","table":"mmwx_guard","elem":[{"elem":{"val":"192.0.2.123","timeout":60,"counter":{"packets":7,"bytes":420}}},{"elem":{"val":"not-an-address","counter":{"packets":99,"bytes":99}}}]}}]}`)
+func TestParseNftSetCountersValidatesTextElements(t *testing.T) {
+	raw := []byte(`table inet mmwx_guard {
+	set offenders_v4 {
+		elements = { 192.0.2.123 counter packets 7 bytes 420,
+			2001:db8::8 counter packets 9 bytes 540,
+			e counter packets 99 bytes 99 }
+	}
+}`)
 	counters := parseNftSetCounters(raw)
-	if len(counters) != 1 || counters["192.0.2.123"] != 7 {
+	if len(counters) != 2 || counters["192.0.2.123"] != 7 || counters["2001:db8::8"] != 9 {
 		t.Fatalf("parseNftSetCounters() = %#v", counters)
 	}
-	if counters := parseNftSetCounters([]byte(`elements = { 192.0.2.123 counter packets 7 bytes 420 }`)); len(counters) != 0 {
-		t.Fatalf("text output was unexpectedly parsed: %#v", counters)
+	if counters := parseNftSetCounters([]byte(`elements = { e counter packets 7 bytes 420 }`)); len(counters) != 0 {
+		t.Fatalf("invalid address was unexpectedly parsed: %#v", counters)
+	}
+}
+
+func TestParseNftDropRuleCountersCountsOnlyDropRules(t *testing.T) {
+	raw := []byte(`{"nftables":[
+		{"set":{"name":"offenders_v4","elem":[{"elem":{"val":"192.0.2.1","counter":{"packets":99,"bytes":5940}}}]}},
+		{"rule":{"expr":[{"counter":{"packets":7,"bytes":420}},{"drop":null}]}},
+		{"rule":{"expr":[{"counter":{"packets":11,"bytes":660}},{"accept":null}]}},
+		{"rule":{"expr":[{"counter":{"packets":13,"bytes":780}},{"drop":null}]}}
+	]}`)
+	total, err := parseNftDropRuleCounters(raw)
+	if err != nil || total != 20 {
+		t.Fatalf("parseNftDropRuleCounters() = %d, %v", total, err)
+	}
+}
+
+func TestCumulativeDropsSurvivesCounterResetAndRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	collector := NewCollector(nil, stateDir)
+	if got := collector.cumulativeDrops(10, true); got != 10 {
+		t.Fatalf("first total = %d, want 10", got)
+	}
+	if got := collector.cumulativeDrops(15, true); got != 15 {
+		t.Fatalf("incremented total = %d, want 15", got)
+	}
+	if got := collector.cumulativeDrops(0, true); got != 15 {
+		t.Fatalf("reset total = %d, want 15", got)
+	}
+	if got := collector.cumulativeDrops(4, true); got != 19 {
+		t.Fatalf("post-reset total = %d, want 19", got)
+	}
+	restarted := NewCollector(nil, stateDir)
+	if got := restarted.cumulativeDrops(6, true); got != 21 {
+		t.Fatalf("restarted total = %d, want 21", got)
+	}
+	info, err := os.Stat(filepath.Join(stateDir, dropCounterStateFilename))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("counter state mode = %v, %v", info.Mode().Perm(), err)
 	}
 }
